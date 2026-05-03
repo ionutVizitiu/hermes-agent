@@ -98,3 +98,42 @@ word word word
         result = json.loads(raw)
         # Should succeed via line-trimmed or indentation-flexible matching
         assert result["success"] is True
+
+
+class TestSkillCreationDir:
+    @pytest.fixture(autouse=True)
+    def setup_skills(self, tmp_path, monkeypatch):
+        skills_dir = tmp_path / "skills"
+        custom_dir = tmp_path / "custom-skills"
+        skills_dir.mkdir()
+        custom_dir.mkdir()
+        (tmp_path / "config.yaml").write_text(
+            "skills:\n"
+            f"  creation_dir: {custom_dir}\n"
+            "  external_dirs:\n"
+            f"    - {custom_dir}\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("tools.skill_manager_tool.SKILLS_DIR", skills_dir)
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        self.skills_dir = skills_dir
+        self.custom_dir = custom_dir
+
+    def test_create_uses_configured_creation_dir(self):
+        result = _create_skill("custom-created", SKILL_CONTENT)
+
+        assert result["success"] is True
+        assert (self.custom_dir / "custom-created" / "SKILL.md").exists()
+        assert not (self.skills_dir / "custom-created" / "SKILL.md").exists()
+        assert result["path"] == str(self.custom_dir / "custom-created")
+
+    def test_created_skill_in_creation_dir_is_writable(self):
+        _create_skill("custom-created", SKILL_CONTENT)
+
+        patch_result = _patch_skill("custom-created", "Step 1: Do the thing.", "Step 1: Updated.")
+        write_result = _write_file("custom-created", "references/example.md", "# Example\n")
+
+        assert patch_result["success"] is True
+        assert write_result["success"] is True
+        assert "Step 1: Updated." in (self.custom_dir / "custom-created" / "SKILL.md").read_text()
+        assert (self.custom_dir / "custom-created" / "references" / "example.md").exists()
