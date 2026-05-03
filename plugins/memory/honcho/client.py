@@ -5,6 +5,11 @@ Resolution order for config file:
   2. ~/.honcho/config.json     (global, shared across all Honcho-enabled apps)
   3. Environment variables     (HONCHO_API_KEY, HONCHO_ENVIRONMENT)
 
+Resolution order for Honcho API key:
+  1. macOS Keychain            (service "hermes/honcho-api-key")
+  2. Config file apiKey fields (backward compatibility)
+  3. Environment variable      (HONCHO_API_KEY)
+
 Resolution order for host-specific settings:
   1. Explicit host block fields (always win)
   2. Flat/global fields from config root
@@ -18,6 +23,8 @@ import os
 import logging
 import hashlib
 import ipaddress
+import platform
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlparse
@@ -34,6 +41,54 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 HOST = "hermes"
+HONCHO_KEYCHAIN_SERVICE = "hermes/honcho-api-key"
+HONCHO_KEYCHAIN_ACCOUNT = "HONCHO_API_KEY"
+# Legacy/simple service name used by early manual setups.
+HONCHO_LEGACY_KEYCHAIN_SERVICE = "HERMES_HONCHO_API_KEY"
+
+
+def _read_honcho_api_key_from_keychain() -> str | None:
+    """Read the Honcho API key from macOS Keychain, when available.
+
+    Preferred entry:
+      service: "hermes/honcho-api-key"
+      account: "HONCHO_API_KEY"
+
+    A legacy service-only entry named "HERMES_HONCHO_API_KEY" is also accepted
+    for compatibility with manually-created setups.
+    """
+    if platform.system() != "Darwin":
+        return None
+
+    commands = [
+        [
+            "security", "find-generic-password",
+            "-s", HONCHO_KEYCHAIN_SERVICE,
+            "-a", HONCHO_KEYCHAIN_ACCOUNT,
+            "-w",
+        ],
+        [
+            "security", "find-generic-password",
+            "-s", HONCHO_LEGACY_KEYCHAIN_SERVICE,
+            "-w",
+        ],
+    ]
+    for command in commands:
+        try:
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            logger.debug("Honcho Keychain lookup failed or timed out")
+            return None
+        if result.returncode == 0:
+            api_key = result.stdout.strip()
+            if api_key:
+                return api_key
+    return None
 
 
 def profile_host_key(profile: str | None) -> str:
@@ -524,7 +579,8 @@ class HonchoClientConfig:
             or resolved_host
         )
         api_key = (
-            host_block.get("apiKey")
+            _read_honcho_api_key_from_keychain()
+            or host_block.get("apiKey")
             or raw.get("apiKey")
             or get_secret("HONCHO_API_KEY")
         )

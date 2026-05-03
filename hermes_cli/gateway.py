@@ -4111,11 +4111,12 @@ def generate_launchd_plist() -> str:
         )
     )
 
-    # Build ProgramArguments array, including --profile when using a named profile
+    # Build ProgramArguments array, including --profile when using a named profile.
+    # On macOS, use the wrapper launcher so secrets can be sourced from Keychain
+    # at process start instead of living in plaintext on disk.
+    launcher_path = str(get_hermes_home() / "bin" / "hermes-env-launch")
     prog_args = [
-        f"<string>{python_path}</string>",
-        "<string>-m</string>",
-        "<string>hermes_cli.main</string>",
+        f"<string>{launcher_path}</string>",
     ]
     if profile_arg:
         for part in profile_arg.split():

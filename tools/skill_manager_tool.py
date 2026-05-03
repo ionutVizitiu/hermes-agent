@@ -4,8 +4,8 @@ Skill Manager Tool -- Agent-Managed Skill Creation & Editing
 
 Allows the agent to create, update, and delete skills, turning successful
 approaches into reusable procedural knowledge. New skills are created in
-~/.hermes/skills/. Existing skills (bundled, hub-installed, or user-created)
-can be modified or deleted wherever they live.
+``skills.creation_dir`` when configured, otherwise ``~/.hermes/skills/``.
+Existing writable skills can be modified or deleted from either location.
 
 Skills are the agent's procedural memory: they capture *how to do a specific
 type of task* based on proven experience. General memory (MEMORY.md, USER.md) is
@@ -151,7 +151,9 @@ def _security_scan_skill(skill_dir: Path) -> Optional[str]:
 import yaml
 
 
-# All skills live in ~/.hermes/skills/ (single source of truth)
+# Default installed/local skills directory. Users can configure a separate
+# writable creation target via skills.creation_dir while keeping hub-installed
+# skills in ~/.hermes/skills/.
 HERMES_HOME = get_hermes_home()
 SKILLS_DIR = HERMES_HOME / "skills"
 _SKILLS_DIR_AT_IMPORT = SKILLS_DIR
@@ -175,11 +177,69 @@ MAX_NAME_LENGTH = 64
 MAX_DESCRIPTION_LENGTH = 1024
 
 
+def _load_skills_config() -> Dict[str, Any]:
+    """Read the lightweight ``skills:`` config block from config.yaml."""
+    config_path = get_hermes_home() / "config.yaml"
+    if not config_path.exists():
+        return {}
+    try:
+        parsed = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    skills_cfg = parsed.get("skills")
+    return skills_cfg if isinstance(skills_cfg, dict) else {}
+
+
+def _resolve_configured_path(raw_path: str) -> Path:
+    """Expand a configured path; relative paths are resolved under HERMES_HOME."""
+    expanded = os.path.expanduser(os.path.expandvars(str(raw_path).strip()))
+    path = Path(expanded)
+    if not path.is_absolute():
+        path = get_hermes_home() / path
+    return path
+
+
+def _get_skill_creation_root() -> Path:
+    """Return where skill_manage(action='create') should create new skills."""
+    creation_dir = _load_skills_config().get("creation_dir")
+    if isinstance(creation_dir, str) and creation_dir.strip():
+        return _resolve_configured_path(creation_dir)
+    return SKILLS_DIR
+
+
+def _get_writable_skill_roots() -> List[Path]:
+    """Skill roots that the agent is allowed to mutate via skill_manage."""
+    roots = [SKILLS_DIR]
+    creation_root = _get_skill_creation_root()
+    if creation_root.resolve() != SKILLS_DIR.resolve():
+        roots.append(creation_root)
+    return roots
+
+
+def _is_local_skill(skill_path: Path) -> bool:
+    """Check if a skill path is within a writable skill root."""
+    try:
+        resolved = skill_path.resolve()
+    except OSError:
+        resolved = skill_path
+    for root in _get_writable_skill_roots():
+        try:
+            resolved.relative_to(root.resolve())
+            return True
+        except (ValueError, OSError):
+            continue
+    return False
+
+
 def _containing_skills_root(skill_path: Path) -> Path:
-    """Return the skills root directory (local or external_dirs entry) that
-    contains ``skill_path``.  Falls back to the local ``SKILLS_DIR`` if no
-    match is found (defensive — callers should have located the skill via
-    ``_find_skill`` first).
+    """Return the skills root directory containing ``skill_path``.
+
+    Includes local skills and external_dirs so deleting an external skill cannot
+    accidentally remove the configured external root when it becomes empty.
+    Falls back to ``SKILLS_DIR`` if no match is found (defensive — callers
+    should have located the skill via ``_find_skill`` first).
     """
     from agent.skill_utils import get_all_skills_dirs
 
@@ -637,9 +697,18 @@ def _validate_content_size(content: str, label: str = "SKILL.md") -> Optional[st
 
 def _resolve_skill_dir(name: str, category: str = None) -> Path:
     """Build the directory path for a new skill, optionally under a category."""
+    root = _get_skill_creation_root()
     if category:
-        return _skills_dir() / category / name
-    return _skills_dir() / name
+        return root / category / name
+    return root / name
+
+
+def _display_skill_path(skill_dir: Path) -> str:
+    """Return a stable result path for skill_manage responses."""
+    try:
+        return str(skill_dir.relative_to(SKILLS_DIR))
+    except ValueError:
+        return str(skill_dir)
 
 
 def _find_skill(name: str) -> Optional[Dict[str, Any]]:
@@ -960,7 +1029,7 @@ def _create_skill(name: str, content: str, category: str = None) -> Dict[str, An
     result = {
         "success": True,
         "message": f"Skill '{name}' created.",
-        "path": str(skill_dir.relative_to(_skills_dir())),
+        "path": _display_skill_path(skill_dir),
         "skill_md": str(skill_md),
         "_change": {"description": _desc},
     }
