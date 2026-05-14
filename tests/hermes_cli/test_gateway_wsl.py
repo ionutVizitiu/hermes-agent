@@ -67,14 +67,27 @@ class TestSupportsSystemdServicesWSL:
         ``is_linux()``, so off Linux this asserted nothing about systemd.
         """
         monkeypatch.setattr(gateway, "is_termux", lambda: False)
-        monkeypatch.setattr(
-            gateway.shutil, "which", lambda _name: "/usr/bin/systemctl"
-        )
+        monkeypatch.setattr(gateway.shutil, "which", lambda cmd: "/usr/bin/systemctl" if cmd == "systemctl" else None)
         monkeypatch.setattr(gateway, "is_wsl", lambda: True)
         monkeypatch.setattr(gateway, "_wsl_systemd_operational", lambda: True)
         assert gateway.supports_systemd_services() is True
 
     @pytest.mark.linux_only
+    def test_wsl_without_systemd(self, monkeypatch):
+        """WSL + no systemd → False."""
+        monkeypatch.setattr(gateway, "is_termux", lambda: False)
+        monkeypatch.setattr(gateway.shutil, "which", lambda cmd: "/usr/bin/systemctl" if cmd == "systemctl" else None)
+        monkeypatch.setattr(gateway, "is_wsl", lambda: True)
+        monkeypatch.setattr(gateway, "_wsl_systemd_operational", lambda: False)
+        assert gateway.supports_systemd_services() is False
+
+    def test_native_linux(self, monkeypatch):
+        """Native Linux (not WSL) → True without checking systemd."""
+        monkeypatch.setattr(gateway, "is_linux", lambda: True)
+        monkeypatch.setattr(gateway, "is_termux", lambda: False)
+        monkeypatch.setattr(gateway.shutil, "which", lambda cmd: "/usr/bin/systemctl" if cmd == "systemctl" else None)
+        monkeypatch.setattr(gateway, "is_wsl", lambda: False)
+        assert gateway.supports_systemd_services() is True
     def test_termux_still_excluded(self, monkeypatch):
         """Termux → False regardless of WSL status.
 
@@ -150,4 +163,3 @@ class TestGatewayCommandWSLMessages:
         out = capsys.readouterr().out
         assert "WSL note" in out
         assert "tmux or screen" in out
-
