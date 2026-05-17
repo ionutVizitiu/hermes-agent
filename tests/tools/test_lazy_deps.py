@@ -314,6 +314,15 @@ class TestActiveFeatures:
         )
         assert "platform.matrix" not in ld.active_features()
 
+    def test_secondary_helper_package_does_not_activate_feature(self, monkeypatch):
+        # Markdown can be installed independently. It must not make
+        # platform.matrix look active when mautrix itself is absent.
+        monkeypatch.setattr(
+            ld, "_is_present",
+            lambda spec: ld._pkg_name_from_spec(spec) == "Markdown",
+        )
+        assert "platform.matrix" not in ld.active_features()
+
 
 class TestRefreshActiveFeatures:
     def test_no_active_features_returns_empty(self, monkeypatch):
