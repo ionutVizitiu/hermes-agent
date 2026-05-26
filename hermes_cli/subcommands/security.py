@@ -59,4 +59,37 @@ def build_security_parser(subparsers, *, cmd_security: Callable) -> None:
         help="Skip scanning pinned MCP servers in config.yaml",
     )
     audit_parser.set_defaults(func=cmd_security)
+
+    local_audit_parser = security_subparsers.add_parser(
+        "local-audit",
+        help="Run a local-only host/Hermes posture audit",
+        description=(
+            "Collect local-only security posture checks: cached macOS updates, "
+            "Homebrew outdated packages without auto-update, listening services, "
+            "Hermes secret-scan counts, sensitive file modes, gateway status, "
+            "and terminal backend containerization. Does not contact remote services."
+        ),
+    )
+    local_audit_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit machine-readable JSON instead of human-readable text",
+    )
+    local_audit_parser.add_argument(
+        "--minimal",
+        action="store_true",
+        help="Only run required sections; skip optional firewall/sharing and git posture checks",
+    )
+    local_audit_parser.add_argument(
+        "--fail-on-fail",
+        action="store_true",
+        help="Exit 1 when any required/actionable section reports FAIL",
+    )
+    local_audit_parser.add_argument(
+        "--hermes-home",
+        default=None,
+        help="Override Hermes home for testing (default: active HERMES_HOME)",
+    )
+    local_audit_parser.set_defaults(func=cmd_security)
+
     security_parser.set_defaults(func=cmd_security)
