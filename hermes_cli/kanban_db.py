@@ -9883,20 +9883,19 @@ def _resolve_hermes_argv() -> list[str]:
     1. ``$HERMES_BIN`` — explicit operator override. Path-like values are
        normalized to absolute paths; bare command names keep normal PATH
        semantics and never prefer a same-directory file before ``PATH``.
-    2. ``shutil.which("hermes")`` — the console-script shim, normalized to
-       an absolute path. On Windows, ``which`` can return a relative
-       ``.\\hermes.CMD`` when the current directory is on ``PATH``; directly
-       launching batch shims is also unsafe with task-derived argv. The
-       dispatcher therefore falls back to the interpreter-bound module form
-       for implicit ``.cmd`` / ``.bat`` shims.
-    3. ``sys.executable -m hermes_cli.main`` — fallback for setups where
-       Hermes is launched from a venv and the ``hermes`` shim is not on
-       the dispatcher's ``$PATH`` (cron, systemd ``User=`` services,
-       launchd jobs, detached processes, etc.). Goes through the running
-       interpreter so the result is independent of ``$PATH``.
+    2. ``sys.executable -m hermes_cli.main`` — the default path for the
+       dispatcher itself.  Worker launches must stay bound to the exact
+       interpreter/import path that is already running the dispatcher; PATH
+       shims are allowed to point at alternate entrypoints such as TUI
+       wrappers, stale venv scripts, or platform-specific shebangs.
+    3. ``shutil.which("hermes")`` — last-resort console-script shim,
+       normalized to an absolute path. On Windows, ``which`` can return a
+       relative ``.\\hermes.CMD`` when the current directory is on ``PATH``;
+       directly launching batch shims is also unsafe with task-derived argv.
+       The dispatcher therefore falls back to the interpreter-bound module
+       form for implicit ``.cmd`` / ``.bat`` shims.
 
-    Mirrors ``gateway.run._resolve_hermes_bin`` for the same reason. Kept
-    local (not imported from gateway) because ``hermes_cli`` sits below
+    Kept local (not imported from gateway) because ``hermes_cli`` sits below
     ``gateway`` in the dependency order.
     """
     import shutil
@@ -9910,10 +9909,14 @@ def _resolve_hermes_argv() -> list[str]:
             return _hermes_path_argv(resolved_env_bin)
         return _module_hermes_argv()
 
+    module_argv = _module_hermes_argv()
+    if sys.executable:
+        return module_argv
+
     hermes_bin = _safe_which_no_cwd("hermes") if _IS_WINDOWS else shutil.which("hermes")
     if hermes_bin:
         return _hermes_path_argv(hermes_bin)
-    return _module_hermes_argv()
+    return module_argv
 
 
 def _worker_terminal_timeout_env(
@@ -10040,6 +10043,14 @@ def _default_spawn(
     from gateway.session_context import _VAR_MAP
     for key in _VAR_MAP:
         env.pop(key, None)
+
+    # Dispatcher ticks can be triggered from the TUI/gateway process. Never let
+    # inherited TUI hand-off variables turn a headless kanban worker's
+    # `chat -q ...` invocation into `hermes --tui` (which crashes without a TTY
+    # and can pick up stale/corrupt ui-tui builds).
+    for key in list(env):
+        if key == "HERMES_TUI" or key.startswith("HERMES_TUI_"):
+            env.pop(key, None)
 
     # Inject HERMES_HOME so the worker reads the profile-scoped config.yaml
     # (fallback_providers, toolsets, agent settings, etc.) instead of the root

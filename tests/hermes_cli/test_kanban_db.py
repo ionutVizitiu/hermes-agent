@@ -806,6 +806,8 @@ class TestSharedBoardPaths:
         default_home = tmp_path / ".hermes"
         default_home.mkdir()
         self._set_home(monkeypatch, tmp_path, default_home)
+        monkeypatch.setenv("HERMES_TUI", "1")
+        monkeypatch.setenv("HERMES_TUI_QUERY", "stale tui query")
 
         from gateway import session_context as sc
 
@@ -859,6 +861,8 @@ class TestSharedBoardPaths:
                 assert env[key] == "kanban"
                 continue
             assert key not in env
+        assert "HERMES_TUI" not in env
+        assert "HERMES_TUI_QUERY" not in env
 
 
 # ---------------------------------------------------------------------------
@@ -1137,10 +1141,123 @@ def test_migrate_add_optional_columns_tolerates_concurrent_migration(kanban_home
 # launchd jobs, and other detached processes routinely run with a stripped
 # $PATH that doesn't include the venv's bin/, so a bare `["hermes", ...]`
 # spawn fails with FileNotFoundError and the task gets stuck. The resolver
-# prefers the PATH shim (familiar `ps` output) but falls back to the module
-# form so the spawn keeps working when PATH is missing the shim.
+# prefers the interpreter-bound module form over PATH shims so stale console
+# scripts, TUI wrappers, and platform-specific shebangs cannot hijack workers.
+# HERMES_BIN remains the explicit operator override.
 # ---------------------------------------------------------------------------
 
+
+def test_resolve_hermes_argv_prefers_module_over_path_shim(monkeypatch):
+    """Implicit PATH shims may be stale or TUI wrappers; workers use the dispatcher interpreter."""
+    import shutil
+    import sys
+    import hermes_cli.kanban_db as kb
+
+    monkeypatch.delenv("HERMES_BIN", raising=False)
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/local/bin/hermes")
+    argv = kb._resolve_hermes_argv()
+    assert argv == [sys.executable, "-m", "hermes_cli.main"]
+
+
+def test_resolve_hermes_argv_absolutizes_relative_exe_shim(monkeypatch, tmp_path):
+    """A relative executable override must not remain workspace-cwd-dependent."""
+    import hermes_cli.kanban_db as kb
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HERMES_BIN", ".\\hermes.exe")
+    monkeypatch.setattr(kb, "_IS_WINDOWS", True)
+
+    assert kb._resolve_hermes_argv() == [os.path.abspath(".\\hermes.exe")]
+
+
+def test_resolve_hermes_argv_avoids_implicit_windows_batch_shim(monkeypatch, tmp_path):
+    """Implicit .cmd/.bat shims use the module fallback, not batch argv[0]."""
+    import sys
+    import hermes_cli.kanban_db as kb
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "hermes.CMD").write_text("@echo off\n", encoding="utf-8")
+    monkeypatch.delenv("HERMES_BIN", raising=False)
+    monkeypatch.setenv("PATH", str(bin_dir))
+    monkeypatch.setenv("PATHEXT", ".CMD")
+    monkeypatch.setattr(kb, "_IS_WINDOWS", True)
+
+    assert kb._resolve_hermes_argv() == [sys.executable, "-m", "hermes_cli.main"]
+
+
+def test_resolve_hermes_argv_honors_hermes_bin_path_override(monkeypatch, tmp_path):
+    """An explicit path-like HERMES_BIN lets service managers pin the executable."""
+    import shutil
+    import hermes_cli.kanban_db as kb
+
+    shim = tmp_path / "bin" / "hermes"
+    shim.parent.mkdir()
+    shim.write_text("#!/bin/sh\n", encoding="utf-8")
+    monkeypatch.setenv("HERMES_BIN", str(shim))
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+
+    assert kb._resolve_hermes_argv() == [str(shim)]
+
+
+def test_resolve_hermes_argv_hermes_bin_bare_name_uses_path(monkeypatch, tmp_path):
+    """Bare HERMES_BIN values keep PATH semantics instead of cwd shadowing."""
+    import stat
+    import hermes_cli.kanban_db as kb
+
+    cwd_hermes = tmp_path / "hermes"
+    cwd_hermes.write_text("wrong\n", encoding="utf-8")
+    cwd_hermes.chmod(cwd_hermes.stat().st_mode | stat.S_IXUSR)
+    path_hermes = tmp_path / "bin" / "hermes"
+    path_hermes.parent.mkdir()
+    path_hermes.write_text("right\n", encoding="utf-8")
+    path_hermes.chmod(path_hermes.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PATH", str(path_hermes.parent))
+    monkeypatch.setenv("HERMES_BIN", "hermes")
+
+    assert kb._resolve_hermes_argv() == [str(path_hermes)]
+
+
+def test_resolve_hermes_argv_hermes_bin_bare_name_ignores_cwd(monkeypatch, tmp_path):
+    """Bare HERMES_BIN does not accept current-directory shadow executables."""
+    import sys
+    import hermes_cli.kanban_db as kb
+
+    (tmp_path / "hermes.exe").write_text("wrong\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PATH", "")
+    monkeypatch.setenv("HERMES_BIN", "hermes")
+    monkeypatch.setattr(kb, "_IS_WINDOWS", True)
+
+    assert kb._resolve_hermes_argv() == [sys.executable, "-m", "hermes_cli.main"]
+
+
+def test_resolve_hermes_argv_hermes_bin_bare_cmd_uses_module_fallback(monkeypatch, tmp_path):
+    """A PATH-resolved HERMES_BIN batch shim is not used as worker argv[0]."""
+    import sys
+    import hermes_cli.kanban_db as kb
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "hermes.CMD").write_text("@echo off\n", encoding="utf-8")
+    monkeypatch.setenv("PATH", str(bin_dir))
+    monkeypatch.setenv("PATHEXT", ".CMD")
+    monkeypatch.setenv("HERMES_BIN", "hermes")
+    monkeypatch.setattr(kb, "_IS_WINDOWS", True)
+
+    assert kb._resolve_hermes_argv() == [sys.executable, "-m", "hermes_cli.main"]
+
+
+def test_resolve_hermes_argv_hermes_bin_unresolved_bare_name_falls_back(monkeypatch):
+    """Unresolved HERMES_BIN command names do not delegate cwd search to Popen."""
+    import sys
+    import hermes_cli.kanban_db as kb
+
+    monkeypatch.setenv("PATH", "")
+    monkeypatch.setenv("HERMES_BIN", "hermes")
+
+    assert kb._resolve_hermes_argv() == [sys.executable, "-m", "hermes_cli.main"]
 
 def test_resolve_hermes_argv_falls_back_to_module_form_when_no_path_shim(monkeypatch):
     """When the shim is not on PATH, fall back to `python -m hermes_cli.main`.
