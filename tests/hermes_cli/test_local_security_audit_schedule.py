@@ -104,3 +104,89 @@ def test_install_rejects_invalid_retention(monkeypatch, tmp_path: Path):
         assert "keep" in str(exc)
     else:
         raise AssertionError("expected invalid keep to raise")
+
+
+def test_uninstall_removes_plist_and_bootouts(tmp_path: Path):
+    plist_path = tmp_path / "job.plist"
+    plist_path.write_bytes(b"dummy")
+
+    args = argparse.Namespace(plist_path=str(plist_path))
+    result = sched.uninstall_launchd_schedule(args)
+
+    assert result["label"] == sched.LABEL
+    assert result["removed_plist"] is True
+    assert not plist_path.exists()
+
+
+def test_uninstall_when_plist_missing(tmp_path: Path):
+    plist_path = tmp_path / "nonexistent.plist"
+
+    args = argparse.Namespace(plist_path=str(plist_path))
+    result = sched.uninstall_launchd_schedule(args)
+
+    assert result["removed_plist"] is False
+
+
+def test_schedule_status_not_installed(tmp_path: Path):
+    plist_path = tmp_path / "nonexistent.plist"
+    report_dir = tmp_path / "reports"
+
+    args = argparse.Namespace(plist_path=str(plist_path), report_dir=str(report_dir))
+    result = sched.schedule_status(args)
+
+    assert result["installed"] is False
+    assert result["loaded"] is False
+    assert result["latest_json_report"] is None
+
+
+def test_default_report_dir():
+    path = sched.default_report_dir(Path("/fake/home/.hermes"))
+    assert str(path).endswith("workspace/security-audits/local-recurring")
+
+
+def test_default_launch_agent_path():
+    path = sched.default_launch_agent_path()
+    assert sched.LABEL in str(path)
+    assert path.suffix == ".plist"
+
+
+def test_validate_schedule_rejects_bad_values():
+    with __import__("pytest").raises(ValueError, match="weekday"):
+        sched._validate_schedule(weekday=7, hour=9, minute=0, keep=12)
+    with __import__("pytest").raises(ValueError, match="hour"):
+        sched._validate_schedule(weekday=1, hour=24, minute=0, keep=12)
+    with __import__("pytest").raises(ValueError, match="minute"):
+        sched._validate_schedule(weekday=1, hour=9, minute=60, keep=12)
+    with __import__("pytest").raises(ValueError, match="keep"):
+        sched._validate_schedule(weekday=1, hour=9, minute=0, keep=0)
+
+
+def test_cmd_local_audit_schedule_run_once(monkeypatch, tmp_path: Path, capsys):
+    home = tmp_path / "home"
+    report_dir = tmp_path / "reports"
+    home.mkdir()
+
+    monkeypatch.setattr(sched, "run_scheduled_audit", lambda **kw: {"status": "pass", "json_report": "/tmp/x.json", "text_report": "/tmp/x.txt", "report_dir": str(report_dir), "removed_reports": []})
+
+    args = argparse.Namespace(schedule_command="run-once", hermes_home=str(home), report_dir=str(report_dir), minimal=False, keep=12, json=False)
+    code = sched.cmd_local_audit_schedule(args)
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "status: pass" in out
+
+
+def test_cmd_local_audit_schedule_status_no_plist(monkeypatch, tmp_path: Path, capsys):
+    plist_path = tmp_path / "nonexistent.plist"
+    report_dir = tmp_path / "reports"
+
+    args = argparse.Namespace(schedule_command="status", hermes_home=None, report_dir=str(report_dir), plist_path=str(plist_path), json=False)
+    code = sched.cmd_local_audit_schedule(args)
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "installed: False" in out
+
+
+def test_cmd_local_audit_schedule_unknown_command(capsys):
+    args = argparse.Namespace(schedule_command="nonexistent", hermes_home=None, report_dir=None, plist_path=None, minimal=False, keep=12, json=False)
+    code = sched.cmd_local_audit_schedule(args)
+    assert code == 1
