@@ -42,8 +42,12 @@ SECRET_SKIP_DIRS = {
     ".pytest_cache",
     "site-packages",
     "plugin-runtime-deps",
-    "checkpoints",
 }
+
+# Historical/runtime stores can legitimately contain old transcripts or logs.
+# Keep counting them, but do not fail recurring audits unless active/live files match.
+SECRET_ARCHIVE_DIRS = {"sessions", "logs", "backups", "checkpoints", "migration"}
+SECRET_ARCHIVE_PATH_PARTS = {("kanban", "workspaces")}
 
 SENSITIVE_RELATIVE_PATHS = [
     "config.yaml",
@@ -237,9 +241,22 @@ def check_secret_scan(hermes_home: Path, max_file_bytes: int = 2_000_000) -> Aud
         return AuditSection("SEC-004", "Hermes secret-scan counts", "warn", f"Hermes home not found: {hermes_home}")
     compiled = {name: re.compile(pattern) for name, pattern in SECRET_PATTERNS.items()}
     counts = {name: 0 for name in compiled}
+    live_counts = {name: 0 for name in compiled}
+    archive_counts = {name: 0 for name in compiled}
     files: dict[str, set[str]] = {name: set() for name in compiled}
+    live_files: dict[str, set[str]] = {name: set() for name in compiled}
+    archive_files: dict[str, set[str]] = {name: set() for name in compiled}
     scanned_files = 0
     skipped_large = 0
+
+    def is_archive_path(path: Path) -> bool:
+        try:
+            rel_parts = path.relative_to(hermes_home).parts
+        except ValueError:
+            rel_parts = path.parts
+        if any(part in SECRET_ARCHIVE_DIRS for part in rel_parts):
+            return True
+        return any(all(part in rel_parts for part in marker) for marker in SECRET_ARCHIVE_PATH_PARTS)
     for base, dirs, filenames in os.walk(hermes_home):
         dirs[:] = [d for d in dirs if d not in SECRET_SKIP_DIRS]
         for filename in filenames:
@@ -256,11 +273,27 @@ def check_secret_scan(hermes_home: Path, max_file_bytes: int = 2_000_000) -> Aud
             for name, regex in compiled.items():
                 matches = regex.findall(text)
                 if matches:
-                    counts[name] += len(matches)
+                    match_count = len(matches)
+                    counts[name] += match_count
                     files[name].add(display_path)
+                    if is_archive_path(path):
+                        archive_counts[name] += match_count
+                        archive_files[name].add(display_path)
+                    else:
+                        live_counts[name] += match_count
+                        live_files[name].add(display_path)
     total = sum(counts.values())
-    status = "fail" if total else "pass"
-    summary = f"{total} secret-like match(es) found across {scanned_files} scanned file(s)." if total else f"No secret-like matches found across {scanned_files} scanned file(s)."
+    live_total = sum(live_counts.values())
+    archive_total = sum(archive_counts.values())
+    if live_total:
+        status = "fail"
+        summary = f"{live_total} active secret-like match(es) and {archive_total} historical match(es) found across {scanned_files} scanned file(s)."
+    elif archive_total:
+        status = "warn"
+        summary = f"{archive_total} historical secret-like match(es) found; no active/live matches across {scanned_files} scanned file(s)."
+    else:
+        status = "pass"
+        summary = f"No secret-like matches found across {scanned_files} scanned file(s)."
     return AuditSection(
         "SEC-004",
         "Hermes secret-scan counts",
@@ -271,7 +304,11 @@ def check_secret_scan(hermes_home: Path, max_file_bytes: int = 2_000_000) -> Aud
             "scanned_files": scanned_files,
             "skipped_large_files": skipped_large,
             "counts": counts,
+            "live_counts": live_counts,
+            "archive_counts": archive_counts,
             "files_by_pattern": {name: sorted(paths)[:50] for name, paths in files.items() if paths},
+            "live_files_by_pattern": {name: sorted(paths)[:50] for name, paths in live_files.items() if paths},
+            "archive_files_by_pattern": {name: sorted(paths)[:50] for name, paths in archive_files.items() if paths},
         },
     )
 

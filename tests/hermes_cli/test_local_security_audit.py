@@ -14,14 +14,30 @@ from hermes_cli import local_security_audit as lsa
 
 
 def test_secret_scan_counts_patterns_without_values(tmp_path: Path):
-    (tmp_path / "sessions").mkdir()
-    token_file = tmp_path / "sessions" / "s.jsonl"
+    token_file = tmp_path / "config.yaml"
     token_file.write_text("token sk-" + "A" * 30 + "\n", encoding="utf-8")
 
     section = lsa.check_secret_scan(tmp_path)
 
     assert section.status == "fail"
     assert section.data["counts"]["openai_style_key"] == 1
+    assert section.data["live_counts"]["openai_style_key"] == 1
+    encoded = json.dumps(section.as_dict())
+    assert "sk-" + "A" * 30 not in encoded
+    assert str(token_file) in encoded
+
+
+def test_secret_scan_historical_sessions_warn_without_values(tmp_path: Path):
+    (tmp_path / "sessions").mkdir()
+    token_file = tmp_path / "sessions" / "s.jsonl"
+    token_file.write_text("token sk-" + "A" * 30 + "\n", encoding="utf-8")
+
+    section = lsa.check_secret_scan(tmp_path)
+
+    assert section.status == "warn"
+    assert section.data["counts"]["openai_style_key"] == 1
+    assert section.data["archive_counts"]["openai_style_key"] == 1
+    assert section.data["live_counts"]["openai_style_key"] == 0
     encoded = json.dumps(section.as_dict())
     assert "sk-" + "A" * 30 not in encoded
     assert str(token_file) in encoded

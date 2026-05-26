@@ -4920,6 +4920,11 @@ def cmd_security(args):
 
         code = cmd_local_security_audit(args)
         sys.exit(int(code or 0))
+    if sub in ("local-audit-schedule", "local_audit_schedule"):
+        from hermes_cli.local_security_audit_schedule import cmd_local_audit_schedule
+
+        code = cmd_local_audit_schedule(args)
+        sys.exit(int(code or 0))
     print(f"unknown security subcommand: {sub}", file=sys.stderr)
     sys.exit(2)
 
