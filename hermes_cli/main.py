@@ -4915,6 +4915,11 @@ def cmd_security(args):
         # Default subcommand is `audit` when no subcmd is given.
         code = cmd_security_audit(args)
         sys.exit(int(code or 0))
+    if sub in ("local-audit", "local_audit"):
+        from hermes_cli.local_security_audit import cmd_local_security_audit
+
+        code = cmd_local_security_audit(args)
+        sys.exit(int(code or 0))
     print(f"unknown security subcommand: {sub}", file=sys.stderr)
     sys.exit(2)
 
