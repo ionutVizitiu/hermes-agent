@@ -1662,6 +1662,46 @@ def _handle_link(args: dict, **kw) -> str:
         return tool_error(f"kanban_link: {e}")
 
 
+def _handle_assign(args: dict, **kw) -> str:
+    """Assign or reassign a task to a profile (orchestrator-only).
+
+    Mirrors the host CLI's ``hermes kanban assign``: delegates to
+    ``kb.assign_task`` which refuses tasks that are currently running
+    (claimed) and resets the failure streak on a profile change.
+    """
+    guard = _require_orchestrator_tool("kanban_assign")
+    if guard:
+        return guard
+    tid = args.get("task_id")
+    if not tid:
+        return tool_error("task_id is required")
+    if "profile" not in args:
+        return tool_error(
+            "profile is required — the profile name to assign, or "
+            "'none' to unassign"
+        )
+    profile = _normalize_profile(args.get("profile"))
+    board = args.get("board")
+    try:
+        kb, conn = _connect(board=board)
+        try:
+            ok = kb.assign_task(conn, str(tid), profile)
+            if not ok:
+                return tool_error(f"no such task: {tid}")
+            return _ok(task_id=str(tid), assignee=profile)
+        finally:
+            conn.close()
+    except RuntimeError as e:
+        # Running/claimed task — surfaced as-is so the orchestrator knows
+        # to wait for completion or ask a human to `hermes kanban reclaim`.
+        return tool_error(f"kanban_assign: {e}")
+    except ValueError as e:
+        return tool_error(f"kanban_assign: {e}")
+    except Exception as e:
+        logger.exception("kanban_assign failed")
+        return tool_error(f"kanban_assign: {e}")
+
+
 # ---------------------------------------------------------------------------
 # Schemas
 # ---------------------------------------------------------------------------
@@ -2326,6 +2366,35 @@ KANBAN_UNBLOCK_SCHEMA = {
     },
 }
 
+KANBAN_ASSIGN_SCHEMA = {
+    "name": "kanban_assign",
+    "description": (
+        "Assign or reassign a Kanban task to a profile (e.g. move a task "
+        "from 'worker' to 'wp-builder'). Orchestrator-only — dispatcher-"
+        "spawned task workers never see this tool. Refuses tasks that are "
+        "currently running; wait for completion or have a human run "
+        "`hermes kanban reclaim` first. Pass profile 'none' to unassign."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "task_id": {
+                "type": "string",
+                "description": "Task id to (re)assign.",
+            },
+            "profile": {
+                "type": "string",
+                "description": (
+                    "Target profile name (must match an existing profile, "
+                    "e.g. 'worker', 'wp-builder'), or 'none' to unassign."
+                ),
+            },
+            "board": _board_schema_prop(),
+        },
+        "required": ["task_id", "profile"],
+    },
+}
+
 KANBAN_LINK_SCHEMA = {
     "name": "kanban_link",
     "description": (
@@ -2464,6 +2533,15 @@ registry.register(
     handler=_handle_unblock,
     check_fn=_check_kanban_orchestrator_mode,
     emoji="▶",
+)
+
+registry.register(
+    name="kanban_assign",
+    toolset="kanban",
+    schema=KANBAN_ASSIGN_SCHEMA,
+    handler=_handle_assign,
+    check_fn=_check_kanban_orchestrator_mode,
+    emoji="🎯",
 )
 
 registry.register(
