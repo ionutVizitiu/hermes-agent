@@ -2713,6 +2713,26 @@ def _try_openrouter(explicit_api_key: str = None, model: str = None) -> Tuple[Op
     if not _is_free_model(or_model):
         _warn_paid_lane_once(or_model)
 
+    # Cross-session daily-quota guard: when the account-wide free-model
+    # daily bucket is exhausted (recorded by any session), skip OpenRouter
+    # for ``:free`` models instead of burning retries on guaranteed 429s.
+    # Deliberately does NOT mark the provider unhealthy — paid OpenRouter
+    # models on the same key still work fine.
+    try:
+        from agent.openrouter_free_quota_guard import free_quota_remaining
+
+        if _is_free_model(or_model):
+            _remaining = free_quota_remaining()
+            if _remaining is not None and _remaining > 0:
+                logger.debug(
+                    "Auxiliary: skipping OpenRouter free model %s "
+                    "(daily quota exhausted, resets in %.0fs)",
+                    or_model, _remaining,
+                )
+                return None, None
+    except Exception:
+        pass
+
     pool_present, entry = _select_pool_entry("openrouter")
     if pool_present:
         or_key = explicit_api_key or _pool_runtime_api_key(entry)
@@ -4475,6 +4495,23 @@ def _recover_provider_pool(provider: str, exc: Exception, *, failed_api_key: str
             _evict_cached_clients(normalized)
             return True
         return False
+
+    if _is_rate_limit_error(exc) and normalized == "openrouter":
+        # OpenRouter free-model daily quota — a model-tier/account quota,
+        # not a credential problem. Marking the key exhausted would poison
+        # the pool for PAID models on the same key (1h cooldown), so record
+        # the cross-session breaker instead and let the auxiliary fallback
+        # chain move on to another provider.
+        try:
+            from agent.openrouter_free_quota_guard import (
+                FREE_DAILY_QUOTA_MARKER,
+                record_free_quota_exhausted,
+            )
+            if FREE_DAILY_QUOTA_MARKER in str(exc).lower():
+                record_free_quota_exhausted(error_context=error_context)
+                return False
+        except Exception:
+            pass
 
     if _is_payment_error(exc) or _is_rate_limit_error(exc):
         fallback_status = 402 if _is_payment_error(exc) else 429

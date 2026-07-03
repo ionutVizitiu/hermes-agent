@@ -1120,6 +1120,36 @@ def _classify_by_status(
         )
 
     if status_code == 429:
+        # OpenRouter free-tier daily quota (":free" models share one
+        # account-wide daily request bucket — "free-models-per-day" /
+        # "free-models-per-day-high-balance"). This is a MODEL-TIER quota,
+        # not a credential problem: the window resets at midnight UTC, so
+        # retry-with-backoff can never recover within a turn, rotating keys
+        # on the same account can't help, and marking the credential
+        # exhausted poisons the pool for PAID models on the same key — the
+        # very fallback that would succeed. Classify like an upstream rate
+        # limit (healthy credential, no rotation, immediate fallback) and
+        # tag the context so the conversation loop can arm the
+        # cross-session daily breaker (openrouter_free_quota_guard).
+        # Not gated on provider — OpenRouter may sit behind a custom
+        # base_url, and the marker string is unambiguous.
+        if "free-models-per-day" in error_msg:
+            ctx: dict = {
+                "openrouter_free_daily": True,
+                "upstream_provider": "OpenRouter free tier (daily quota)",
+            }
+            _reset_ms = _extract_openrouter_metadata_header(
+                body, "x-ratelimit-reset"
+            )
+            if _reset_ms is not None:
+                ctx["openrouter_free_daily_reset_ms"] = _reset_ms
+            return result_fn(
+                FailoverReason.upstream_rate_limit,
+                retryable=True,
+                should_rotate_credential=False,
+                should_fallback=True,
+                error_context=ctx,
+            )
         # Already checked long_context_tier above. Some providers (notably
         # Z.AI / Zhipu) reuse HTTP 429 for server-wide overload — same status
         # code as a true per-credential rate limit, but the credential is
@@ -1839,4 +1869,30 @@ def _extract_upstream_provider_name(body: Any) -> Optional[str]:
     name = metadata.get("provider_name")
     if isinstance(name, str) and name.strip():
         return name.strip()
+    return None
+
+
+def _extract_openrouter_metadata_header(body: Any, header: str) -> Optional[str]:
+    """Pull a rate-limit header value out of OpenRouter's error metadata.
+
+    OpenRouter 429 bodies carry the limit state in
+    ``error.metadata.headers`` (e.g. ``X-RateLimit-Reset`` as epoch
+    milliseconds) rather than only in the HTTP response headers. Header
+    name matching is case-insensitive.
+    """
+    if not isinstance(body, dict):
+        return None
+    err = body.get("error")
+    if not isinstance(err, dict):
+        return None
+    metadata = err.get("metadata")
+    if not isinstance(metadata, dict):
+        return None
+    headers = metadata.get("headers")
+    if not isinstance(headers, dict):
+        return None
+    target = header.strip().lower()
+    for key, value in headers.items():
+        if str(key).strip().lower() == target:
+            return str(value)
     return None

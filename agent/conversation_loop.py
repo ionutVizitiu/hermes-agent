@@ -2475,6 +2475,62 @@ def run_conversation(
                 except Exception:
                     pass  # Never let rate guard break the agent loop
 
+            # ── OpenRouter free-model daily quota guard ────────────
+            # If any session already recorded that the account-wide
+            # free-model daily bucket is empty, skip the API call for
+            # ``:free`` models entirely — every attempt just 429s until
+            # the window resets (midnight UTC). Because this guard
+            # re-runs after each fallback activation, ``:free`` entries
+            # later in the fallback chain are skipped automatically and
+            # only paid/other-provider entries are attempted.
+            if agent.provider == "openrouter":
+                try:
+                    from agent.openrouter_free_quota_guard import (
+                        free_quota_remaining,
+                        is_free_model,
+                        format_remaining as _fmt_or_remaining,
+                    )
+                    if is_free_model(getattr(agent, "model", None)):
+                        _or_remaining = free_quota_remaining()
+                        if _or_remaining is not None and _or_remaining > 0:
+                            _or_msg = (
+                                f"OpenRouter free-model daily quota exhausted — "
+                                f"resets in {_fmt_or_remaining(_or_remaining)}."
+                            )
+                            agent._buffer_vprint(
+                                f"⏳ {_or_msg} Trying fallback..."
+                            )
+                            agent._buffer_status(f"⏳ {_or_msg}")
+                            if agent._try_activate_fallback():
+                                active_system_prompt = _sync_failover_system_message(
+                                    agent, api_messages, active_system_prompt)
+                                retry_count = 0
+                                compression_attempts = 0
+                                _retry.primary_recovery_attempted = False
+                                continue
+                            # No usable fallback — fail fast with a clear
+                            # message instead of burning the retry budget.
+                            agent._flush_status_buffer()
+                            agent._persist_session(messages, conversation_history)
+                            return {
+                                "final_response": (
+                                    f"⏳ {_or_msg}\n\n"
+                                    "No fallback provider available. "
+                                    "Switch to a paid model, try again after "
+                                    "the reset, or add a fallback provider "
+                                    "in config.yaml."
+                                ),
+                                "messages": messages,
+                                "api_calls": api_call_count,
+                                "completed": False,
+                                "failed": True,
+                                "error": _or_msg,
+                            }
+                except ImportError:
+                    pass
+                except Exception:
+                    pass  # Never let rate guard break the agent loop
+
             try:
                 agent._reset_stream_delivery_tracking()
                 # api_messages is built once, before this retry loop, while the
@@ -3806,6 +3862,24 @@ def run_conversation(
                         clear_nous_rate_limit()
                     except Exception:
                         pass
+                # Same for the OpenRouter free-model daily breaker: a
+                # successful ``:free`` response proves the daily window
+                # has reset, so other sessions can resume using free
+                # models.
+                elif agent.provider == "openrouter":
+                    try:
+                        from agent.openrouter_free_quota_guard import (
+                            clear_free_quota,
+                            free_quota_remaining,
+                            is_free_model,
+                        )
+                        if (
+                            is_free_model(getattr(agent, "model", None))
+                            and free_quota_remaining() is not None
+                        ):
+                            clear_free_quota()
+                    except Exception:
+                        pass
                 from agent import relay_llm
 
                 relay_llm.complete_logical_call(
@@ -4810,6 +4884,31 @@ def run_conversation(
                 )
                 if _is_zai_coding_overload:
                     max_retries = max(max_retries, zai_coding_overload_retry_ceiling())
+                # ── OpenRouter free-model daily quota: arm breaker ─────
+                # Record BEFORE attempting fallback so every other session
+                # (cron, kanban workers, gateway, auxiliary) learns the
+                # daily bucket is empty even when this session recovers
+                # via its fallback chain. The top-of-loop guard reads
+                # this file and skips ``:free`` models until the window
+                # resets (midnight UTC).
+                _or_free_daily = bool(
+                    (classified.error_context or {}).get("openrouter_free_daily")
+                )
+                if _or_free_daily:
+                    try:
+                        from agent.openrouter_free_quota_guard import (
+                            record_free_quota_exhausted,
+                        )
+                        _or_err_resp = getattr(api_error, "response", None)
+                        record_free_quota_exhausted(
+                            headers=(
+                                getattr(_or_err_resp, "headers", None)
+                                if _or_err_resp else None
+                            ),
+                            error_context=classified.error_context,
+                        )
+                    except Exception:
+                        pass
                 _should_fallback = (
                     is_rate_limited
                     or (_is_transport_failure and retry_count >= 2)
@@ -4856,6 +4955,33 @@ def run_conversation(
                             compression_attempts = 0
                             _retry.primary_recovery_attempted = False
                             continue
+
+                # ── OpenRouter free-model daily quota: skip retries ────
+                # The daily bucket won't refill within the retry window,
+                # so backing off and retrying only wastes time (the
+                # eager fallback above already ran if a chain entry was
+                # available). Re-enter the loop so the top-of-loop guard
+                # walks the remaining fallback chain or bails with a
+                # clear message — mirrors the Nous breaker below. Gated
+                # on the breaker file actually being readable: if the
+                # record above failed to persist, the top-of-loop guard
+                # would never fire and this would loop forever, so fall
+                # through to the normal retry/exhaustion path instead.
+                if _or_free_daily and agent.provider == "openrouter":
+                    try:
+                        from agent.openrouter_free_quota_guard import (
+                            free_quota_remaining,
+                            is_free_model,
+                        )
+                        # Only when the top-of-loop guard is guaranteed to
+                        # take over (same provider/model predicate) —
+                        # otherwise this continue would spin on the API
+                        # call without ever advancing retry_count.
+                        if is_free_model(getattr(agent, "model", None)) and free_quota_remaining():
+                            retry_count = max(0, max_retries - 1)
+                            continue
+                    except Exception:
+                        pass
 
                 # ── Auth-failure provider failover ───────────────────────
                 # A 401/403 that survives the per-provider credential-refresh
