@@ -2102,6 +2102,129 @@ def test_dir_workspace_honors_given_path(kanban_home, tmp_path):
     assert ws.exists()
 
 
+def _mock_docker_volumes(monkeypatch, volumes):
+    """Point kanban_db's config lookup at a fake ``terminal.docker_volumes``."""
+    import hermes_cli.config as config_mod
+
+    monkeypatch.setattr(
+        config_mod,
+        "load_config",
+        lambda: {"terminal": {"docker_volumes": volumes}},
+    )
+
+
+_requires_no_workspace_anchor = pytest.mark.skipif(
+    Path("/workspace").exists(),
+    reason="/workspace exists on this machine; the container-anchor heuristic "
+    "only translates paths whose anchor is missing",
+)
+
+
+@_requires_no_workspace_anchor
+def test_dir_workspace_translates_container_path_via_docker_volume(
+    kanban_home, tmp_path, monkeypatch
+):
+    """A dir task carrying an in-container path (e.g. created by a dockerized
+    agent) resolves to the host side of the configured bind mount."""
+    host_ws = tmp_path / "host-ws"
+    host_ws.mkdir()
+    _mock_docker_volumes(monkeypatch, [f"{host_ws}:/workspace"])
+    with kb.connect() as conn:
+        t = kb.create_task(
+            conn,
+            title="cos",
+            workspace_kind="dir",
+            workspace_path="/workspace/chief-of-staff/notes",
+        )
+        task = kb.get_task(conn, t)
+        assert task is not None
+        ws = kb.resolve_workspace(task)
+    assert ws == host_ws / "chief-of-staff" / "notes"
+    assert ws.is_dir()
+
+
+@_requires_no_workspace_anchor
+def test_legacy_scratch_explicit_container_path_translates(
+    kanban_home, tmp_path, monkeypatch
+):
+    """The legacy scratch-with-explicit-path branch gets the same rewrite."""
+    host_ws = tmp_path / "host-ws"
+    host_ws.mkdir()
+    _mock_docker_volumes(monkeypatch, [f"{host_ws}:/workspace"])
+    with kb.connect() as conn:
+        t = kb.create_task(conn, title="legacy")
+        kb.set_workspace_path(conn, t, "/workspace/scratch-area")
+        task = kb.get_task(conn, t)
+        assert task is not None
+        ws = kb.resolve_workspace(task)
+    assert ws == host_ws / "scratch-area"
+    assert ws.is_dir()
+
+
+@_requires_no_workspace_anchor
+def test_translate_prefers_longest_container_prefix(tmp_path, monkeypatch):
+    """A nested mount (/workspace/projects) wins over its parent (/workspace)."""
+    host_ws = tmp_path / "host-ws"
+    host_projects = tmp_path / "host-projects"
+    _mock_docker_volumes(
+        monkeypatch,
+        [f"{host_ws}:/workspace", f"{host_projects}:/workspace/projects:rw"],
+    )
+    out = kb._translate_container_workspace_path(
+        Path("/workspace/projects/app"), task_id="t1"
+    )
+    assert out == host_projects / "app"
+    # Everything else under /workspace still maps through the parent mount.
+    out = kb._translate_container_workspace_path(
+        Path("/workspace/other"), task_id="t1"
+    )
+    assert out == host_ws / "other"
+
+
+def test_translate_leaves_existing_host_path_untouched(tmp_path, monkeypatch):
+    """A path whose anchor exists on this machine is never rewritten, even
+    with mounts configured."""
+    host_ws = tmp_path / "host-ws"
+    _mock_docker_volumes(monkeypatch, [f"{host_ws}:/workspace"])
+    native = tmp_path / "native" / "dir"
+    out = kb._translate_container_workspace_path(native, task_id="t1")
+    assert out == native
+
+
+def test_translate_passes_through_unmounted_container_path(monkeypatch):
+    """A missing-anchor path that sits under no configured mount is returned
+    as-is (and left to fail loudly downstream)."""
+    _mock_docker_volumes(monkeypatch, ["/some-host:/workspace"])
+    p = Path("/container-only/data")
+    assert kb._translate_container_workspace_path(p, task_id="t1") == p
+
+
+def test_translate_degrades_without_docker_volumes(monkeypatch):
+    """Empty, missing, or unloadable config means no translation at all."""
+    import hermes_cli.config as config_mod
+
+    p = Path("/workspace/chief-of-staff/x")
+    for cfg in ({}, {"terminal": {}}, {"terminal": {"docker_volumes": []}}):
+        monkeypatch.setattr(config_mod, "load_config", lambda cfg=cfg: cfg)
+        assert kb._container_volume_map() == []
+        assert kb._translate_container_workspace_path(p, task_id="t1") == p
+
+    def boom():
+        raise RuntimeError("config unreadable")
+
+    monkeypatch.setattr(config_mod, "load_config", boom)
+    assert kb._container_volume_map() == []
+    assert kb._translate_container_workspace_path(p, task_id="t1") == p
+
+
+def test_container_volume_map_skips_malformed_specs(monkeypatch):
+    _mock_docker_volumes(
+        monkeypatch,
+        ["relative:also-relative", 42, "/only-host", "/h:/c:ro"],
+    )
+    assert kb._container_volume_map() == [(Path("/c"), Path("/h"))]
+
+
 def test_worktree_workspace_repo_root_anchor_materializes_linked_worktree(kanban_home, tmp_path):
     repo = tmp_path / "repo"
     _init_git_repo(repo)

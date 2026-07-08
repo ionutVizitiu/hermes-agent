@@ -5502,6 +5502,69 @@ def _resolve_worktree_workspace(
     return requested, branch_name
 
 
+def _container_volume_map() -> list[tuple[Path, Path]]:
+    """Reverse map (container -> host) of the dispatcher's bind mounts.
+
+    Built from ``terminal.docker_volumes`` (``host:container[:mode]``),
+    sorted longest container prefix first so nested mounts (e.g.
+    ``/workspace/projects`` inside ``/workspace``) win over their parent.
+    Returns an empty list when config can't be loaded — callers must
+    degrade gracefully.
+    """
+    try:
+        from hermes_cli.config import load_config
+        vols = (load_config().get("terminal") or {}).get("docker_volumes") or []
+    except Exception:
+        return []
+    pairs: list[tuple[Path, Path]] = []
+    for spec in vols:
+        if not isinstance(spec, str):
+            continue
+        parts = spec.split(":")
+        if len(parts) >= 2 and parts[0].startswith("/") and parts[1].startswith("/"):
+            pairs.append((Path(parts[1]), Path(parts[0])))
+    pairs.sort(key=lambda cp: len(cp[0].parts), reverse=True)
+    return pairs
+
+
+def _translate_container_workspace_path(p: Path, *, task_id: str) -> Path:
+    """Best-effort rewrite of an in-container path to its host equivalent.
+
+    The dispatcher prepares ``dir``/``scratch`` workspaces on the HOST,
+    but agents run inside Docker where host dirs are bind-mounted (e.g.
+    ``~/.hermes/workspace`` -> ``/workspace``). Tasks created from inside
+    a container occasionally carry container paths; ``mkdir`` on those
+    fails on the host (macOS root is read-only -> ``[Errno 30]``) and
+    burns dispatch attempts until the task auto-blocks. When the path's
+    top-level anchor does not exist on this machine but the path sits
+    under the container side of a configured bind mount, rewrite it to
+    the host side instead. Longest mount prefix wins, so
+    ``/workspace/projects/...`` maps to the projects mount rather than
+    the workspace mount it is nested in.
+    """
+    if len(p.parts) < 2:
+        return p
+    anchor = Path(p.parts[0]) / p.parts[1]  # e.g. /workspace
+    if anchor.exists():
+        # Anchor is real on this machine (native path, or we *are* inside
+        # a container deployment) — nothing to translate.
+        return p
+    for container, host in _container_volume_map():
+        try:
+            rel = p.relative_to(container)
+        except ValueError:
+            continue
+        translated = host / rel
+        _log.warning(
+            "task %s: workspace_path %s looks like an in-container path "
+            "(no %s on this machine); using host equivalent %s from "
+            "terminal.docker_volumes",
+            task_id, p, anchor, translated,
+        )
+        return translated
+    return p
+
+
 def resolve_workspace(task: Task, *, board: Optional[str] = None) -> Path:
     """Resolve (and create if needed) the workspace for a task.
 
@@ -5540,6 +5603,7 @@ def resolve_workspace(task: Task, *, board: Optional[str] = None) -> Path:
                     f"task {task.id} has non-absolute workspace_path "
                     f"{task.workspace_path!r}; workspace paths must be absolute"
                 )
+            p = _translate_container_workspace_path(p, task_id=task.id)
         else:
             p = workspaces_root(board=board) / task.id
         p.mkdir(parents=True, exist_ok=True)
@@ -5556,6 +5620,7 @@ def resolve_workspace(task: Task, *, board: Optional[str] = None) -> Path:
                 f"{task.workspace_path!r}; use an absolute path "
                 f"(relative paths are ambiguous against the dispatcher's CWD)"
             )
+        p = _translate_container_workspace_path(p, task_id=task.id)
         p.mkdir(parents=True, exist_ok=True)
         return p
     if kind == "worktree":
