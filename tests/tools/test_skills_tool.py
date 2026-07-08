@@ -376,7 +376,52 @@ class TestSkillView:
         assert skill["linked_files"] is not None
         assert "references" in skill["linked_files"]
 
-    def test_disabled_skill_blocked_enabled_allowed(self, tmp_path):
+    def test_view_reference_index_descriptions(self, tmp_path):
+        """reference_index carries per-file routing descriptions: frontmatter
+        description wins, first heading is the fallback, undescribable files
+        still appear as path-only entries."""
+        with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
+            skill_dir = _make_skill(tmp_path, "my-skill")
+            refs_dir = skill_dir / "references"
+            refs_dir.mkdir()
+            (refs_dir / "api.md").write_text(
+                "---\ndescription: Load when calling the payments API.\n---\n\n# API\nBody."
+            )
+            (refs_dir / "guide.md").write_text("# Setup Guide\nBody.")
+            (refs_dir / "bare.md").write_text("no heading, no frontmatter")
+            raw = skill_view("my-skill")
+        result = json.loads(raw)
+        index = {e["path"]: e.get("description") for e in result["reference_index"]}
+        assert index["references/api.md"] == "Load when calling the payments API."
+        assert index["references/guide.md"] == "Setup Guide"
+        assert index["references/bare.md"] is None
+        # linked_files stays a plain sorted path list for backward compat
+        assert result["linked_files"]["references"] == [
+            "references/api.md",
+            "references/bare.md",
+            "references/guide.md",
+        ]
+
+    def test_view_tags_from_metadata(self, tmp_path):
+        with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
+            _make_skill(
+                tmp_path,
+                "tagged",
+                frontmatter_extra="metadata:\n  hermes:\n    tags: [fine-tuning, llm]\n",
+            )
+            raw = skill_view("tagged")
+        result = json.loads(raw)
+        assert "fine-tuning" in result["tags"]
+        assert "llm" in result["tags"]
+
+    def test_view_nonexistent_skills_dir(self, tmp_path):
+        with patch("tools.skills_tool.SKILLS_DIR", tmp_path / "nope"):
+            raw = skill_view("anything")
+        result = json.loads(raw)
+        assert result["success"] is False
+
+    def test_view_disabled_skill_blocked(self, tmp_path):
+        """Disabled skills should not be viewable via skill_view."""
         with (
             patch("tools.skills_tool.SKILLS_DIR", tmp_path),
             patch("tools.skills_tool._is_skill_disabled", return_value=True),
