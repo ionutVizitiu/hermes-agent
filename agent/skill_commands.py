@@ -363,6 +363,8 @@ def _build_skill_message(
                         supporting.append(rel)
 
     if supporting and skill_dir:
+        from agent.skill_utils import extract_support_file_description
+
         try:
             skill_view_target = str(skill_dir.relative_to(SKILLS_DIR))
         except ValueError:
@@ -371,11 +373,16 @@ def _build_skill_message(
         parts.append("")
         parts.append("[This skill has supporting files:]")
         for sf in supporting:
-            parts.append(f"- {sf}  ->  {skill_dir / sf}")
+            line = f"- {sf}  ->  {skill_dir / sf}"
+            description = extract_support_file_description(skill_dir / sf)
+            if description:
+                line += f" — {description}"
+            parts.append(line)
         parts.append(
             f'\nLoad any of these with skill_view(name="{skill_view_target}", '
             f'file_path="<path>"), or run scripts directly by absolute path '
-            f"(e.g. `node {skill_dir}/scripts/foo.js`)."
+            f"(e.g. `node {skill_dir}/scripts/foo.js`). Load only the files "
+            f"the current task needs — the descriptions say when each applies."
         )
 
     stable_prefix = None

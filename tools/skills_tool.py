@@ -1513,9 +1513,9 @@ def skill_view(
         if skill_dir:
             references_dir = skill_dir / "references"
             if references_dir.exists():
-                reference_files = [
+                reference_files = sorted(
                     str(f.relative_to(skill_dir)) for f in references_dir.glob("*.md")
-                ]
+                )
 
             templates_dir = skill_dir / "templates"
             if templates_dir.exists():
@@ -1571,6 +1571,20 @@ def skill_view(
             linked_files["assets"] = asset_files
         if script_files:
             linked_files["scripts"] = script_files
+
+        # Annotated reference index: one-line description per reference so the
+        # agent can route to the right file instead of loading all of them.
+        # linked_files stays a plain path list for backward compatibility.
+        reference_index = []
+        if skill_dir and reference_files:
+            from agent.skill_utils import extract_support_file_description
+
+            for rel in reference_files:
+                entry = {"path": rel}
+                desc = extract_support_file_description(skill_dir / rel)
+                if desc:
+                    entry["description"] = desc
+                reference_index.append(entry)
 
         try:
             rel_path = str(skill_md.relative_to(active_skills_dir))
@@ -1739,7 +1753,8 @@ def skill_view(
             "skill_dir": str(skill_dir) if skill_dir else None,
             "org_provenance": org_provenance,
             "linked_files": linked_files if linked_files else None,
-            "usage_hint": "To view linked files, call skill_view(name, file_path) where file_path is e.g. 'references/api.md' or 'assets/config.yaml'"
+            "reference_index": reference_index if reference_index else None,
+            "usage_hint": "To view linked files, call skill_view(name, file_path) where file_path is e.g. 'references/api.md' or 'assets/config.yaml'. reference_index describes when to load each reference — load only what the task needs."
             if linked_files
             else None,
             "required_environment_variables": required_env_vars,

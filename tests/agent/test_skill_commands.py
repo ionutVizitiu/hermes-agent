@@ -394,6 +394,37 @@ class TestBuildSkillInvocationMessage:
         assert msg is not None
         bump_use.assert_called_once_with("test-skill", task_id="task-slash")
 
+    def test_supporting_files_block_includes_descriptions(self, tmp_path):
+        """Slash/bundle injection annotates each supporting file with its
+        one-line description so agents route instead of loading everything."""
+        with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
+            skill_dir = _make_skill(tmp_path, "ref-skill")
+            refs_dir = skill_dir / "references"
+            refs_dir.mkdir()
+            (refs_dir / "api.md").write_text(
+                "---\ndescription: Load when calling the payments API.\n---\n\n# API\n"
+            )
+            (refs_dir / "guide.md").write_text("# Setup Guide\nBody.")
+            scan_skill_commands()
+            msg = build_skill_invocation_message("/ref-skill", "")
+        assert msg is not None
+        assert "references/api.md" in msg
+        assert "— Load when calling the payments API." in msg
+        assert "— Setup Guide" in msg
+
+    def test_returns_none_for_unknown(self, tmp_path):
+        with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
+            scan_skill_commands()
+            msg = build_skill_invocation_message("/nonexistent")
+        assert msg is None
+
+    def test_returns_none_when_skill_load_fails(self, tmp_path):
+        with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
+            _make_skill(tmp_path, "broken-skill")
+            scan_skill_commands()
+            with patch("agent.skill_commands._load_skill_payload", return_value=None):
+                msg = build_skill_invocation_message("/broken-skill", "do stuff")
+        assert msg is None
 
     def test_uses_shared_skill_loader_for_secure_setup(self, tmp_path, monkeypatch):
         monkeypatch.delenv("TENOR_API_KEY", raising=False)

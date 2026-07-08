@@ -912,6 +912,73 @@ def iter_skill_index_files(skills_dir: Path, filename: str):
         yield Path(path)
 
 
+# ── Support-file descriptions (progressive disclosure routing) ────────────
+
+# Read at most this much of a support file when extracting its description.
+# Frontmatter and first headings live at the top; anything past this is body.
+_SUPPORT_DESC_HEAD_BYTES = 8192
+
+_CODE_SUFFIXES = frozenset((".py", ".sh", ".bash", ".js", ".ts", ".rb"))
+
+
+def extract_support_file_description(path, max_len: int = 200) -> str:
+    """Best-effort one-line description of a skill support file.
+
+    Priority: YAML frontmatter ``description:`` → first Markdown ``#`` heading
+    → first docstring/comment line for script files → "". Listings of
+    references/templates/scripts use this so the agent can pick the right file
+    to load instead of guessing from filenames (or loading everything).
+    """
+    try:
+        p = Path(path)
+        with open(p, "r", encoding="utf-8", errors="replace") as fh:
+            head = fh.read(_SUPPORT_DESC_HEAD_BYTES)
+    except (OSError, ValueError):
+        return ""
+
+    desc = ""
+    if head.startswith("---"):
+        try:
+            frontmatter, _ = parse_frontmatter(head)
+            desc = str(frontmatter.get("description") or "").strip()
+        except Exception:
+            desc = ""
+
+    if not desc:
+        suffix = p.suffix.lower()
+        if suffix in (".md", ".markdown"):
+            for line in head.splitlines():
+                stripped = line.strip()
+                if stripped.startswith("#"):
+                    desc = stripped.lstrip("#").strip()
+                    break
+        elif suffix in _CODE_SUFFIXES:
+            in_docstring = False
+            for line in head.splitlines():
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#!"):
+                    continue
+                if stripped.startswith(('"""', "'''")):
+                    candidate = stripped.strip("\"'").strip()
+                    if candidate:
+                        desc = candidate
+                        break
+                    in_docstring = True
+                    continue
+                if in_docstring:
+                    desc = stripped.strip("\"'").strip()
+                    break
+                if stripped.startswith("#"):
+                    desc = stripped.lstrip("#").strip()
+                    break
+                break  # first code line, no doc — nothing to extract
+
+    desc = " ".join(desc.split())
+    if len(desc) > max_len:
+        desc = desc[: max_len - 1].rstrip() + "…"
+    return desc
+
+
 # ── Namespace helpers for plugin-provided skills ───────────────────────────
 
 _NAMESPACE_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
