@@ -684,15 +684,27 @@ def load_cli_config() -> Dict[str, Any]:
     }
     
     # Bridge config → env vars for terminal_tool. TERMINAL_CWD is force-exported
-    # UNLESS we're inside a gateway process (detected by _HERMES_GATEWAY marker)
-    # where it was already set correctly by gateway/run.py's config bridge.
+    # UNLESS we're inside the gateway process itself (detected by _HERMES_GATEWAY
+    # marker) where it was already set correctly by gateway/run.py's config bridge.
+    #
+    # Exception: kanban workers are spawned by the in-gateway dispatcher and so
+    # inherit _HERMES_GATEWAY=1, but each is an independent `hermes -p <profile>
+    # chat` subprocess that must honour ITS profile's terminal.cwd. The dispatcher
+    # pins TERMINAL_CWD to the task's *host* workspace path (kanban_db.py), which
+    # is meaningless inside a container backend and makes terminal_tool fall back
+    # to /root — unwritable under docker_run_as_host_user, so every command dies
+    # with "cd: /root: Permission denied". Detect the worker via HERMES_KANBAN_TASK
+    # and let it bridge its own cwd. _HERMES_GATEWAY is otherwise preserved, so the
+    # gateway-lifecycle command guard in terminal_tool still protects the worker.
     _is_gateway = os.environ.get("_HERMES_GATEWAY") == "1"
+    _is_kanban_worker = bool(os.environ.get("HERMES_KANBAN_TASK"))
     for config_key, env_var in env_mappings.items():
         if config_key in terminal_config:
             if env_var == "TERMINAL_CWD":
-                if _is_gateway:
+                if _is_gateway and not _is_kanban_worker:
                     continue
-                # CLI: always export (overrides stale .env or inherited values)
+                # CLI (and kanban workers): always export (overrides stale .env
+                # or inherited gateway/dispatcher values).
                 os.environ[env_var] = str(terminal_config[config_key])
                 continue
             if _file_has_terminal_config or env_var not in os.environ:
