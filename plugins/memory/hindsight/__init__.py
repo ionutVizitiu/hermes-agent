@@ -683,13 +683,113 @@ class HindsightMemoryProvider(MemoryProvider):
 
     def backup_paths(self) -> List[str]:
         """Hindsight's legacy shared config and embedded-mode profile env
-        files live under ~/.hindsight (see _load_config / line ~509)."""
+        files live under ~/.hindsight (see _load_config / line ~509).
+
+        In local_embedded mode the memories themselves live in a pg0-managed
+        Postgres instance under ~/.pg0/instances/hindsight-embed-<profile>
+        (see hindsight_embed.daemon_embed_manager.get_database_url) — without
+        it a restored backup has config but an empty memory bank. A raw file
+        copy of a *running* Postgres data dir can be torn, so when the server
+        is live we also write a consistent pg_dump under ~/.hindsight/dumps/
+        (already captured via the legacy dir; restore with pg_restore).
+        """
         try:
             from pathlib import Path
             legacy_dir = Path.home() / ".hindsight"
-            return [str(legacy_dir)]
+            paths = [str(legacy_dir)]
         except Exception:
             return []
+
+        try:
+            import re
+            config = _load_config()
+            if str(config.get("mode") or "").strip() == "local_embedded":
+                profile = _embedded_profile_name(config)
+                # Same sanitization as daemon_embed_manager._sanitize_profile_name.
+                safe_profile = re.sub(r"[^a-zA-Z0-9_-]", "-", profile)
+                instance = f"hindsight-embed-{safe_profile}"
+                pg0_dir = Path.home() / ".pg0" / "instances" / instance
+                if pg0_dir.is_dir():
+                    paths.append(str(pg0_dir))
+                    self._dump_embedded_database(
+                        pg0_dir, legacy_dir / "dumps" / f"{instance}.pgdump"
+                    )
+        except Exception as exc:
+            logger.warning("Hindsight backup_paths: embedded pg0 discovery failed: %s", exc)
+        return paths
+
+    @staticmethod
+    def _dump_embedded_database(pg0_dir, dump_path) -> None:
+        """Best-effort consistent pg_dump of the embedded pg0 Postgres.
+
+        Only runs when the instance's postmaster is alive — a cleanly stopped
+        instance's data dir copies consistently as plain files. Never raises:
+        backup must not fail because of this; on any problem we log and fall
+        back to the raw data-dir copy alone.
+        """
+        import subprocess
+
+        tmp = None
+        try:
+            pid_file = pg0_dir / "data" / "postmaster.pid"
+            if not pid_file.exists():
+                return
+            try:
+                pid = int(pid_file.read_text(encoding="utf-8").splitlines()[0].strip())
+                os.kill(pid, 0)
+            except (ValueError, IndexError, ProcessLookupError):
+                return  # stale pid file — server not running, raw copy is fine
+            except PermissionError:
+                pass  # process alive but not ours — treat as running
+
+            info = json.loads((pg0_dir / "instance.json").read_text(encoding="utf-8"))
+            from pathlib import Path
+            pg_dump = (
+                Path(info["installation_dir"]) / str(info["version"]) / "bin" / "pg_dump"
+            )
+            if not pg_dump.exists():
+                logger.warning(
+                    "Hindsight backup: pg_dump not found at %s — raw copy of the "
+                    "running Postgres data dir may be inconsistent", pg_dump,
+                )
+                return
+
+            dump_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = dump_path.with_name(dump_path.name + ".partial")
+            env = dict(os.environ, PGPASSWORD=str(info.get("password") or ""))
+            proc = subprocess.run(
+                [
+                    str(pg_dump),
+                    "-h", "127.0.0.1",
+                    "-p", str(info.get("port") or 5432),
+                    "-U", str(info.get("username") or "hindsight"),
+                    "-d", str(info.get("database") or "hindsight"),
+                    "--format=custom",
+                    "--file", str(tmp),
+                ],
+                env=env,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                timeout=120,
+            )
+            if proc.returncode == 0:
+                os.replace(tmp, dump_path)
+                logger.info("Hindsight backup: wrote consistent pg_dump to %s", dump_path)
+            else:
+                logger.warning(
+                    "Hindsight backup: pg_dump exited %s — raw copy of the running "
+                    "Postgres data dir may be inconsistent: %s",
+                    proc.returncode,
+                    proc.stderr.decode(errors="replace")[-400:],
+                )
+        except Exception as exc:
+            logger.warning("Hindsight backup: pg_dump attempt failed: %s", exc)
+        finally:
+            if tmp is not None:
+                try:
+                    tmp.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
     def __init__(self):
         self._config = None
