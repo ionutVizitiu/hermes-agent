@@ -127,9 +127,14 @@ def test_uninstall_when_plist_missing(tmp_path: Path):
     assert result["removed_plist"] is False
 
 
-def test_schedule_status_not_installed(tmp_path: Path):
+def test_schedule_status_not_installed(tmp_path: Path, monkeypatch):
     plist_path = tmp_path / "nonexistent.plist"
     report_dir = tmp_path / "reports"
+
+    # The status check queries launchctl by the real label; on a machine where
+    # the schedule is genuinely loaded that would report loaded=True. Pretend
+    # launchctl is absent so the test observes only the tmp_path state.
+    monkeypatch.setattr(sched.shutil, "which", lambda _name: None)
 
     args = argparse.Namespace(plist_path=str(plist_path), report_dir=str(report_dir))
     result = sched.schedule_status(args)
