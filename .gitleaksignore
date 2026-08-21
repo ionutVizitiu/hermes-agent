@@ -1,0 +1,13 @@
+# False positives: upstream test fixtures with obviously fake keys
+# (sk-proj-WRONGVENDORKEY1234, test-key-1234567890, operator-provided-key-123…)
+# plus one nonsense generic-api-key match on a kwarg (clarify_mod=clarify_mod).
+# Flagged by the pre-commit gitleaks hook during the 2026-08-21 upstream merge.
+gateway/run.py:generic-api-key:974
+tests/cli/test_show_config_credential.py:generic-api-key:40
+tests/cli/test_show_config_credential.py:generic-api-key:48
+tests/run_agent/test_run_agent.py:generic-api-key:1187
+tests/tools/test_stage2_hook_api_server_keygen.py:generic-api-key:112
+tests/tools/test_stage2_hook_api_server_keygen.py:generic-api-key:116
+tests/tools/test_stage2_hook_api_server_keygen.py:generic-api-key:142
+tests/tools/test_stage2_hook_api_server_keygen.py:generic-api-key:157
+tests/tools/test_stage2_hook_api_server_keygen.py:generic-api-key:177
