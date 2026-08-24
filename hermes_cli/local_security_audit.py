@@ -24,7 +24,9 @@ from hermes_constants import get_hermes_home
 STATUS_ORDER = {"pass": 0, "info": 0, "warn": 1, "fail": 2}
 
 SECRET_PATTERNS: dict[str, str] = {
-    "openai_style_key": r"sk-[A-Za-z0-9_-]{20,}",
+    # Lookbehind avoids matching inside words like "risk-management-framework";
+    # sk-ecdsa-/sk-ssh- are FIDO SSH key algorithm names, not API keys.
+    "openai_style_key": r"(?<![A-Za-z0-9_-])sk-(?!ecdsa-|ssh-)[A-Za-z0-9_-]{20,}",
     "github_classic_token": r"ghp_[A-Za-z0-9_]{20,}",
     "github_fine_grained_token": r"github_pat_[A-Za-z0-9_]{20,}",
     "slack_token": r"xox[baprs]-[A-Za-z0-9-]{10,}",
@@ -62,7 +64,12 @@ SECRET_FIXTURE_PATH_SUBSTRINGS = (
     "/hermes-agent/apps/desktop/",
     "/hermes-agent/hermes_cli/web_dist/",
 )
-SECRET_FIXTURE_FILENAMES = {".env.example", "redact.py"}
+SECRET_FIXTURE_FILENAMES = {".env.example", "redact.py", ".gitleaksignore"}
+
+# Legitimate secret stores are supposed to hold real credentials. When their
+# permissions are owner-only they count separately and do not fail the audit;
+# a loosely-permissioned copy still counts as a live match.
+SECRET_STORE_FILENAMES = {".env", "auth.json", "nous_auth.json", "config.yaml"}
 
 SENSITIVE_RELATIVE_PATHS = [
     "config.yaml",
@@ -259,10 +266,12 @@ def check_secret_scan(hermes_home: Path, max_file_bytes: int = 2_000_000) -> Aud
     live_counts = {name: 0 for name in compiled}
     archive_counts = {name: 0 for name in compiled}
     fixture_counts = {name: 0 for name in compiled}
+    store_counts = {name: 0 for name in compiled}
     files: dict[str, set[str]] = {name: set() for name in compiled}
     live_files: dict[str, set[str]] = {name: set() for name in compiled}
     archive_files: dict[str, set[str]] = {name: set() for name in compiled}
     fixture_files: dict[str, set[str]] = {name: set() for name in compiled}
+    store_files: dict[str, set[str]] = {name: set() for name in compiled}
     scanned_files = 0
     skipped_large = 0
 
@@ -271,6 +280,14 @@ def check_secret_scan(hermes_home: Path, max_file_bytes: int = 2_000_000) -> Aud
             return True
         posix = path.as_posix()
         return any(marker in posix for marker in SECRET_FIXTURE_PATH_SUBSTRINGS)
+
+    def is_secure_store_path(path: Path) -> bool:
+        if path.name not in SECRET_STORE_FILENAMES:
+            return False
+        try:
+            return not (path.stat().st_mode & 0o077)
+        except OSError:
+            return False
 
     def is_archive_path(path: Path) -> bool:
         try:
@@ -302,6 +319,9 @@ def check_secret_scan(hermes_home: Path, max_file_bytes: int = 2_000_000) -> Aud
                     if is_fixture_path(path):
                         fixture_counts[name] += match_count
                         fixture_files[name].add(display_path)
+                    elif is_secure_store_path(path):
+                        store_counts[name] += match_count
+                        store_files[name].add(display_path)
                     elif is_archive_path(path):
                         archive_counts[name] += match_count
                         archive_files[name].add(display_path)
@@ -312,15 +332,17 @@ def check_secret_scan(hermes_home: Path, max_file_bytes: int = 2_000_000) -> Aud
     live_total = sum(live_counts.values())
     archive_total = sum(archive_counts.values())
     fixture_total = sum(fixture_counts.values())
+    store_total = sum(store_counts.values())
+    excluded = f"{fixture_total} fixture/example and {store_total} secured-store match(es) excluded"
     if live_total:
         status = "fail"
-        summary = f"{live_total} active secret-like match(es) and {archive_total} historical match(es) found across {scanned_files} scanned file(s) ({fixture_total} fixture/example match(es) excluded)."
+        summary = f"{live_total} active secret-like match(es) and {archive_total} historical match(es) found across {scanned_files} scanned file(s) ({excluded})."
     elif archive_total:
         status = "warn"
-        summary = f"{archive_total} historical secret-like match(es) found; no active/live matches across {scanned_files} scanned file(s) ({fixture_total} fixture/example match(es) excluded)."
+        summary = f"{archive_total} historical secret-like match(es) found; no active/live matches across {scanned_files} scanned file(s) ({excluded})."
     else:
         status = "pass"
-        summary = f"No secret-like matches found across {scanned_files} scanned file(s) ({fixture_total} fixture/example match(es) excluded)."
+        summary = f"No secret-like matches found across {scanned_files} scanned file(s) ({excluded})."
     return AuditSection(
         "SEC-004",
         "Hermes secret-scan counts",
@@ -334,10 +356,12 @@ def check_secret_scan(hermes_home: Path, max_file_bytes: int = 2_000_000) -> Aud
             "live_counts": live_counts,
             "archive_counts": archive_counts,
             "fixture_counts": fixture_counts,
+            "store_counts": store_counts,
             "files_by_pattern": {name: sorted(paths)[:50] for name, paths in files.items() if paths},
             "live_files_by_pattern": {name: sorted(paths)[:50] for name, paths in live_files.items() if paths},
             "archive_files_by_pattern": {name: sorted(paths)[:50] for name, paths in archive_files.items() if paths},
             "fixture_files_by_pattern": {name: sorted(paths)[:50] for name, paths in fixture_files.items() if paths},
+            "store_files_by_pattern": {name: sorted(paths)[:50] for name, paths in store_files.items() if paths},
         },
     )
 
