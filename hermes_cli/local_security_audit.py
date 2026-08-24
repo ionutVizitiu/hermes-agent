@@ -423,7 +423,12 @@ def check_gateway_status(hermes_home: Path) -> AuditSection:
     pid: int | None = None
     if pid_file.exists():
         try:
-            pid = int(pid_file.read_text().strip())
+            raw = pid_file.read_text().strip()
+            try:
+                pid = int(raw)
+            except ValueError:
+                # Newer gateways write a JSON pid file: {"pid": ..., "kind": ...}.
+                pid = int(json.loads(raw)["pid"])
             running = Path(f"/proc/{pid}").exists() if platform.system() == "Linux" else _run(["ps", "-p", str(pid), "-o", "pid="], timeout=5)["ok"]
         except Exception:
             running = False
