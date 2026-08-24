@@ -49,6 +49,21 @@ SECRET_SKIP_DIRS = {
 SECRET_ARCHIVE_DIRS = {"sessions", "logs", "backups", "checkpoints", "migration"}
 SECRET_ARCHIVE_PATH_PARTS = {("kanban", "workspaces")}
 
+# Fixture/example content quotes secret-shaped strings by design: test suites,
+# skill reference docs, example env files, redaction pattern sources, cached web
+# pages, and cron transcripts. Counted separately, never fails the audit.
+SECRET_FIXTURE_PATH_SUBSTRINGS = (
+    "/tests/",
+    "/skills/autonomous-ai-agents/",
+    "/cache/web/",
+    "/cron/output/",
+    "/.claude/worktrees/",
+    "/hermes-agent/website/",
+    "/hermes-agent/apps/desktop/",
+    "/hermes-agent/hermes_cli/web_dist/",
+)
+SECRET_FIXTURE_FILENAMES = {".env.example", "redact.py"}
+
 SENSITIVE_RELATIVE_PATHS = [
     "config.yaml",
     ".env",
@@ -243,11 +258,19 @@ def check_secret_scan(hermes_home: Path, max_file_bytes: int = 2_000_000) -> Aud
     counts = {name: 0 for name in compiled}
     live_counts = {name: 0 for name in compiled}
     archive_counts = {name: 0 for name in compiled}
+    fixture_counts = {name: 0 for name in compiled}
     files: dict[str, set[str]] = {name: set() for name in compiled}
     live_files: dict[str, set[str]] = {name: set() for name in compiled}
     archive_files: dict[str, set[str]] = {name: set() for name in compiled}
+    fixture_files: dict[str, set[str]] = {name: set() for name in compiled}
     scanned_files = 0
     skipped_large = 0
+
+    def is_fixture_path(path: Path) -> bool:
+        if path.name in SECRET_FIXTURE_FILENAMES:
+            return True
+        posix = path.as_posix()
+        return any(marker in posix for marker in SECRET_FIXTURE_PATH_SUBSTRINGS)
 
     def is_archive_path(path: Path) -> bool:
         try:
@@ -276,7 +299,10 @@ def check_secret_scan(hermes_home: Path, max_file_bytes: int = 2_000_000) -> Aud
                     match_count = len(matches)
                     counts[name] += match_count
                     files[name].add(display_path)
-                    if is_archive_path(path):
+                    if is_fixture_path(path):
+                        fixture_counts[name] += match_count
+                        fixture_files[name].add(display_path)
+                    elif is_archive_path(path):
                         archive_counts[name] += match_count
                         archive_files[name].add(display_path)
                     else:
@@ -285,15 +311,16 @@ def check_secret_scan(hermes_home: Path, max_file_bytes: int = 2_000_000) -> Aud
     total = sum(counts.values())
     live_total = sum(live_counts.values())
     archive_total = sum(archive_counts.values())
+    fixture_total = sum(fixture_counts.values())
     if live_total:
         status = "fail"
-        summary = f"{live_total} active secret-like match(es) and {archive_total} historical match(es) found across {scanned_files} scanned file(s)."
+        summary = f"{live_total} active secret-like match(es) and {archive_total} historical match(es) found across {scanned_files} scanned file(s) ({fixture_total} fixture/example match(es) excluded)."
     elif archive_total:
         status = "warn"
-        summary = f"{archive_total} historical secret-like match(es) found; no active/live matches across {scanned_files} scanned file(s)."
+        summary = f"{archive_total} historical secret-like match(es) found; no active/live matches across {scanned_files} scanned file(s) ({fixture_total} fixture/example match(es) excluded)."
     else:
         status = "pass"
-        summary = f"No secret-like matches found across {scanned_files} scanned file(s)."
+        summary = f"No secret-like matches found across {scanned_files} scanned file(s) ({fixture_total} fixture/example match(es) excluded)."
     return AuditSection(
         "SEC-004",
         "Hermes secret-scan counts",
@@ -306,9 +333,11 @@ def check_secret_scan(hermes_home: Path, max_file_bytes: int = 2_000_000) -> Aud
             "counts": counts,
             "live_counts": live_counts,
             "archive_counts": archive_counts,
+            "fixture_counts": fixture_counts,
             "files_by_pattern": {name: sorted(paths)[:50] for name, paths in files.items() if paths},
             "live_files_by_pattern": {name: sorted(paths)[:50] for name, paths in live_files.items() if paths},
             "archive_files_by_pattern": {name: sorted(paths)[:50] for name, paths in archive_files.items() if paths},
+            "fixture_files_by_pattern": {name: sorted(paths)[:50] for name, paths in fixture_files.items() if paths},
         },
     )
 
