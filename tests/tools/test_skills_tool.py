@@ -402,6 +402,20 @@ class TestSkillView:
             "references/guide.md",
         ]
 
+    def test_view_file_path_directory_returns_available_files(self, tmp_path):
+        """Requesting a directory returns the useful not-found payload."""
+        with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
+            skill_dir = _make_skill(tmp_path, "my-skill")
+            refs_dir = skill_dir / "references"
+            refs_dir.mkdir()
+            (refs_dir / "api.md").write_text("# API Docs\nEndpoint info.")
+
+            result = json.loads(skill_view("my-skill", file_path="references"))
+
+        assert result["success"] is False
+        assert "not found" in result["error"]
+        assert "references/api.md" in result["available_files"]["references"]
+
     def test_view_tags_from_metadata(self, tmp_path):
         with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
             _make_skill(
