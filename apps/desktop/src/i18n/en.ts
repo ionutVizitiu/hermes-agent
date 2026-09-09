@@ -922,6 +922,11 @@ export const en: Translations = {
       },
       cloudRefresh: 'Refresh',
       cloudConnect: 'Connect',
+      cloudSavedTitle: 'Saved Cloud gateways',
+      cloudSavedDesc:
+        'Use a saved gateway without changing your default. Sign in below to add instances. Manage names and sign-in in the saved connections list.',
+      cloudUseSaved: 'Use gateway',
+      cloudActive: 'Active in this window',
       cloudConnecting: 'Connecting…',
       cloudDiscoverFailed: 'Could not load your Hermes Cloud agents',
       cloudConnectFailed: 'Could not connect to that agent',
@@ -2367,13 +2372,23 @@ export const en: Translations = {
   },
 
   sidebar: {
+    gatewayGroups: {
+      grouping: 'Gateway & profile',
+      rename: 'Rename group',
+      aliasLabel: 'Display name',
+      aliasHint: 'Display name only; gateway and profile names stay unchanged.',
+      resetName: 'Reset name',
+      moveUp: 'Move up',
+      moveDown: 'Move down',
+      reorder: 'Reorder group',
+      actions: 'Group actions'
+    },
     nav: {
       'new-session': 'New session',
       skills: 'Capabilities',
       messaging: 'Messaging',
       artifacts: 'Artifacts',
-      cron: 'Scheduled jobs',
-      'session-import': 'Import session'
+      cron: 'Scheduled jobs'
     },
     searchAria: 'Search sessions',
     searchPlaceholder: 'Search sessions…',

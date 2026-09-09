@@ -1135,6 +1135,11 @@ export const ru = defineLocale({
       },
       cloudRefresh: 'Обновить',
       cloudConnect: 'Подключиться',
+      cloudSavedTitle: 'Сохранённые облачные шлюзы',
+      cloudSavedDesc:
+        'Используйте сохранённый шлюз без изменения шлюза по умолчанию. Войдите ниже, чтобы добавить экземпляры. Имена и вход — в списке сохранённых подключений.',
+      cloudUseSaved: 'Использовать шлюз',
+      cloudActive: 'Активен в этом окне',
       cloudConnecting: 'Подключение…',
       cloudDiscoverFailed: 'Не удалось загрузить агентов Hermes Cloud',
       cloudConnectFailed: 'Не удалось подключиться к этому агенту',
@@ -2400,13 +2405,23 @@ export const ru = defineLocale({
     missingBody: 'Этот артефакт больше нет в локальном реестре.'
   },
   sidebar: {
+    gatewayGroups: {
+      grouping: 'Шлюз и профиль',
+      rename: 'Переименовать группу',
+      aliasLabel: 'Отображаемое имя',
+      aliasHint: 'Меняется только отображаемое имя; имена шлюза и профиля остаются прежними.',
+      resetName: 'Сбросить имя',
+      moveUp: 'Переместить вверх',
+      moveDown: 'Переместить вниз',
+      reorder: 'Изменить порядок групп',
+      actions: 'Действия с группой'
+    },
     nav: {
       'new-session': 'Новый сеанс',
       skills: 'Возможности',
       messaging: 'Сообщения',
       artifacts: 'Артефакты',
-      cron: 'Запланированные задачи',
-      'session-import': 'Импортировать сессию'
+      cron: 'Запланированные задачи'
     },
     searchAria: 'Поиск сеансов',
     searchPlaceholder: 'Поиск сеансов…',

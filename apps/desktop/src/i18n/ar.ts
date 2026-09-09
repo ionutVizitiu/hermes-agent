@@ -1735,6 +1735,17 @@ export const ar = defineLocale({
     missingBody: 'لم يعد هذا الناتج موجودًا في السجل المحلي.'
   },
   sidebar: {
+    gatewayGroups: {
+      grouping: 'البوابة والملف الشخصي',
+      rename: 'إعادة تسمية المجموعة',
+      aliasLabel: 'اسم العرض',
+      aliasHint: 'يتغير اسم العرض فقط؛ تبقى أسماء البوابة والملف الشخصي دون تغيير.',
+      resetName: 'إعادة تعيين الاسم',
+      moveUp: 'نقل لأعلى',
+      moveDown: 'نقل لأسفل',
+      reorder: 'إعادة ترتيب المجموعة',
+      actions: 'إجراءات المجموعة'
+    },
     nav: {
       'new-session': 'جلسة جديدة',
       skills: 'المهارات',
@@ -1743,8 +1754,7 @@ export const ar = defineLocale({
       chat: 'المحادثة',
       settings: 'الإعدادات',
       cron: 'المهام المجدولة',
-      agents: 'الوكلاء',
-      'session-import': 'استيراد جلسة'
+      agents: 'الوكلاء'
     },
     searchAria: 'البحث في الجلسات',
     searchPlaceholder: 'البحث في الجلسات...',
