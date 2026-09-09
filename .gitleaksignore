@@ -11,3 +11,13 @@ tests/tools/test_stage2_hook_api_server_keygen.py:generic-api-key:116
 tests/tools/test_stage2_hook_api_server_keygen.py:generic-api-key:142
 tests/tools/test_stage2_hook_api_server_keygen.py:generic-api-key:157
 tests/tools/test_stage2_hook_api_server_keygen.py:generic-api-key:177
+
+# False positives from the 2026-09-08 upstream merge: public OAuth client IDs
+# (Anthropic, MiniMax, xAI, Qwen — public by design in a device/PKCE flow), a
+# prose code comment, and an env-var *name* in a label tuple, not a value.
+agent/anthropic_credentials.py:generic-api-key:34
+agent/context_compressor.py:generic-api-key:3196
+hermes_cli/auth_constants.py:generic-api-key:68
+hermes_cli/auth_constants.py:generic-api-key:94
+hermes_cli/auth_constants.py:generic-api-key:101
+hermes_cli/setup_migration.py:generic-api-key:94
