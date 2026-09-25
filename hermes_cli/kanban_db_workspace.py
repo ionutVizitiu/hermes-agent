@@ -539,19 +539,45 @@ def _resolve_worktree_workspace(task: Task, *, board: Optional[str] = None) -> t
     return requested, branch_name
 
 
-def _container_volume_map() -> list[tuple[Path, Path]]:
-    """Reverse map (container -> host) of the dispatcher's bind mounts.
+def _assignee_docker_volumes(assignee: Optional[str]) -> list:
+    """``terminal.docker_volumes`` from the ASSIGNEE's profile config.
 
-    Built from ``terminal.docker_volumes`` (``host:container[:mode]``),
-    sorted longest container prefix first so nested mounts (e.g.
-    ``/workspace/projects`` inside ``/workspace``) win over their parent.
-    Returns an empty list when config can't be loaded — callers must
-    degrade gracefully.
+    The dispatcher runs inside a gateway that multiplexes every profile, so a
+    bare ``load_config()`` reads the launch profile's mounts, not the ones the
+    worker will actually get. Reads under the same profile scope the
+    dispatcher uses to resolve worker toolsets. Raises when the assignee is
+    unknown or its config can't load; the caller treats that as "no mounts".
     """
+    from hermes_cli.config import load_config
+    from hermes_cli.kanban_db_dispatch import _worker_profile_scope
+    from hermes_cli.profiles import normalize_profile_name, resolve_profile_env
+
+    home = resolve_profile_env(normalize_profile_name(assignee))
+    with _worker_profile_scope(home):
+        return list((load_config().get("terminal") or {}).get("docker_volumes") or [])
+
+
+def _container_volume_map(assignee: Optional[str]) -> list[tuple[Path, Path]]:
+    """Reverse map (container -> host) of the assignee's bind mounts.
+
+    Built from the assignee profile's ``terminal.docker_volumes``
+    (``host:container[:mode]``), sorted longest container prefix first so
+    nested mounts (e.g. ``/workspace/projects`` inside ``/workspace``) win
+    over their parent. Returns an empty list when there is no assignee or
+    its config can't be loaded. Never falls back to the dispatcher's own
+    mounts: those point at another profile's workspace, which exists, so the
+    worker would silently run in the wrong directory.
+    """
+    if not assignee:
+        return []
     try:
-        from hermes_cli.config import load_config
-        vols = (load_config().get("terminal") or {}).get("docker_volumes") or []
-    except Exception:
+        vols = _assignee_docker_volumes(assignee)
+    except Exception as exc:
+        _log.warning(
+            "kanban: could not load terminal.docker_volumes for assignee %r (%s); "
+            "container workspace paths will not be translated",
+            assignee, exc,
+        )
         return []
     pairs: list[tuple[Path, Path]] = []
     for spec in vols:
@@ -564,7 +590,9 @@ def _container_volume_map() -> list[tuple[Path, Path]]:
     return pairs
 
 
-def _translate_container_workspace_path(p: Path, *, task_id: str) -> Path:
+def _translate_container_workspace_path(
+    p: Path, *, task_id: str, assignee: Optional[str]
+) -> Path:
     """Best-effort rewrite of an in-container path to its host equivalent.
 
     The dispatcher prepares ``dir``/``scratch`` workspaces on the HOST,
@@ -575,9 +603,10 @@ def _translate_container_workspace_path(p: Path, *, task_id: str) -> Path:
     burns dispatch attempts until the task auto-blocks. When the path's
     top-level anchor does not exist on this machine but the path sits
     under the container side of a configured bind mount, rewrite it to
-    the host side instead. Longest mount prefix wins, so
-    ``/workspace/projects/...`` maps to the projects mount rather than
-    the workspace mount it is nested in.
+    the host side instead. The mounts come from the assignee's profile,
+    since each profile mounts its own workspace at ``/workspace``. Longest
+    mount prefix wins, so ``/workspace/projects/...`` maps to the projects
+    mount rather than the workspace mount it is nested in.
     """
     if len(p.parts) < 2:
         return p
@@ -586,7 +615,7 @@ def _translate_container_workspace_path(p: Path, *, task_id: str) -> Path:
         # Anchor is real on this machine (native path, or we *are* inside
         # a container deployment) — nothing to translate.
         return p
-    for container, host in _container_volume_map():
+    for container, host in _container_volume_map(assignee):
         try:
             rel = p.relative_to(container)
         except ValueError:
@@ -595,8 +624,8 @@ def _translate_container_workspace_path(p: Path, *, task_id: str) -> Path:
         _log.warning(
             "task %s: workspace_path %s looks like an in-container path "
             "(no %s on this machine); using host equivalent %s from "
-            "terminal.docker_volumes",
-            task_id, p, anchor, translated,
+            "%s's terminal.docker_volumes",
+            task_id, p, anchor, translated, assignee,
         )
         return translated
     return p
@@ -642,7 +671,9 @@ def resolve_workspace(task: Task, *, board: Optional[str] = None) -> Path:
     if task.workspace_path:
         # Explicit paths may have been recorded from inside a container;
         # remap to the host side of the bind mount before mkdir.
-        p = _translate_container_workspace_path(p, task_id=task.id)
+        p = _translate_container_workspace_path(
+            p, task_id=task.id, assignee=task.assignee
+        )
     p.mkdir(parents=True, exist_ok=True)
     return p
 
