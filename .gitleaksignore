@@ -49,3 +49,12 @@ tests/tui_gateway/test_multi_profile_hosting_fail_closed.py:generic-api-key:27
 tests/tui_gateway/test_multi_profile_hosting_fail_closed.py:generic-api-key:28
 ui-tui/src/__tests__/useSessionLifecycleStoredSid.test.ts:generic-api-key:66
 website/docusaurus.config.ts:generic-api-key:111
+
+# Upstream test fixtures, allowlisted by hermes-update-local on 2026-09-25.
+apps/desktop/electron/app-version.test.ts:generic-api-key:60
+apps/desktop/scripts/side-by-side.windows.test.mjs:generic-api-key:94
+apps/desktop/electron/updater/channel.test.ts:generic-api-key:67
+apps/desktop/electron/updater/channel.test.ts:generic-api-key:142
+tests/agent/test_copilot_acp_client.py:generic-api-key:79
+tests/e2e/core/dashboard/test_dashboard_auth.py:generic-api-key:2
+tests/scripts/test_channel_build_versions.py:generic-api-key:16
