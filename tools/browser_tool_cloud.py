@@ -4,8 +4,10 @@ Split out of ``tools/browser_tool.py``. Facade-owned state is read through ``_bt
 
 from __future__ import annotations
 
+import logging
 import os
 from typing import Callable, Optional
+from urllib.parse import urlsplit
 
 from agent.browser_provider import BrowserProvider as CloudBrowserProvider
 from agent.browser_registry import get_provider as _registry_get_browser_provider
@@ -16,6 +18,8 @@ from tools.tool_backend_helpers import normalize_browser_cloud_provider
 from utils import is_truthy_value
 from tools.browser_tool_origin import origin_module as _origin
 from tools import browser_tool_cdp as _cdp
+
+logger = logging.getLogger(__name__)
 
 
 def _memo(_bt, resolved_attr: str, cache_attr: str, compute: Callable[[], object]):
@@ -266,3 +270,62 @@ def _resolve_allow_private_urls() -> bool:
     """Read the browser private-URL toggle from the active config scope."""
     _bt = _origin()
     return _bt._browser_cfg("allow_private_urls", False, lambda v: is_truthy_value(v, default=False), "allow_private_urls from config")
+
+
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+
+
+def _parse_private_url_allowlist(raw: object) -> tuple:
+    """``browser.private_url_allowlist`` as ``(scheme | None, host, port | None)`` entries.
+
+    An entry is ``host``, ``host:port`` or an origin (``http://host:port``); IPv6 hosts go in brackets.
+    Hosts match exactly: wildcards, paths, queries and credentials are rejected so an entry can never
+    name more than the one origin the operator wrote. Malformed entries are dropped with a warning.
+    """
+    entries = [raw] if isinstance(raw, str) else raw if isinstance(raw, (list, tuple)) else ()
+    parsed = []
+    for entry in entries:
+        text = str(entry).strip()
+        if not text:
+            continue
+        try:
+            parts = urlsplit(text if "://" in text else f"//{text}")
+            host, port = (parts.hostname or "").rstrip("."), parts.port
+        except ValueError:
+            host, port = "", None
+        scheme = parts.scheme.lower() if host else ""
+        if (not host or "*" in host or parts.path not in ("", "/") or parts.query or parts.fragment
+                or parts.username is not None or (scheme and scheme not in _DEFAULT_PORTS)):
+            logger.warning("Ignoring browser.private_url_allowlist entry %r: expected host, host:port or "
+                           "http(s)://host[:port]", entry)
+            continue
+        parsed.append((scheme or None, host, port))
+    return tuple(parsed)
+
+
+def _private_url_allowlist() -> tuple:
+    """Parsed ``browser.private_url_allowlist``, cached like ``_allow_private_urls`` (per call under a routed profile)."""
+    _bt = _origin()
+    return _memo(_bt, "_private_url_allowlist_resolved", "_cached_private_url_allowlist",
+                 lambda: _bt._browser_cfg("private_url_allowlist", (), _parse_private_url_allowlist,
+                                          "private_url_allowlist from config"))
+
+
+def _private_url_allowlisted(url: str) -> bool:
+    """True when ``url``'s origin is named in ``browser.private_url_allowlist``.
+
+    The narrow form of ``allow_private_urls``: only the listed hosts (and ports, when given) skip the
+    private-address check. The cloud-metadata floor is enforced by the caller and still applies.
+    """
+    entries = _private_url_allowlist()
+    if not entries or not isinstance(url, str):
+        return False
+    try:
+        parts = urlsplit(url.strip())
+        scheme, host = parts.scheme.lower(), (parts.hostname or "").rstrip(".")
+        port = parts.port or _DEFAULT_PORTS.get(scheme)
+    except ValueError:
+        return False
+    if scheme not in _DEFAULT_PORTS or not host:
+        return False
+    return any((s is None or s == scheme) and h == host and (p is None or p == port) for s, h, p in entries)

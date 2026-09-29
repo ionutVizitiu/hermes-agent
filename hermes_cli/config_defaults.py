@@ -437,6 +437,9 @@ DEFAULT_CONFIG = {
         # headed: visible Chromium window (local); skips per-turn cleanup, idle reaper still applies
         "headed": False,
         "allow_private_urls": False,  # allow private/internal IPs (localhost, 192.168.x.x, ...)
+        # Narrow form of allow_private_urls: exact origins that skip the private-address check,
+        # e.g. ["127.0.0.1:8088", "http://shop.localhost"]. Cloud-metadata addresses stay blocked.
+        "private_url_allowlist": [],
         # Local browser engine for both drivers. "auto" = Chrome; "lightpanda" = faster navigation,
         # no screenshots (Browser Use mode spawns `lightpanda serve` per session; built-in tools
         # pass `--engine <value>` to agent-browser with Chrome fallback); "chrome" = explicit.

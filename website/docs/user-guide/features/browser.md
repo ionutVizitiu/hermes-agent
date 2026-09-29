@@ -160,6 +160,29 @@ auto-installs it). Post-navigation redirects from a public URL onto a private
 address are still blocked (you can't use a redirect-to-internal trick to reach
 your LAN through the public path).
 
+### Allowing specific private origins
+
+The private-address guard also applies when the terminal runs in a sandbox
+(`terminal.backend: docker`, `ssh`, ...) and the browser runs on the host: the
+host browser can reach networks the sandbox cannot. To let it open one local
+site without opening the whole LAN, list that origin:
+
+```yaml
+# ~/.hermes/config.yaml
+browser:
+  private_url_allowlist:
+    - 127.0.0.1:8088          # host:port
+    - http://shop.localhost   # scheme://host — port defaults to 80
+    - dev.test                # host only — any port, either scheme
+```
+
+Hosts match exactly. Wildcards, paths and credentials are rejected. A redirect
+from a listed origin to one that isn't listed is still blocked, and
+cloud-metadata addresses stay blocked even if listed. Include the port for
+loopback hosts: a bare `127.0.0.1` also opens every other local service on the
+machine. `browser.allow_private_urls: true` remains the switch that allows every
+private address.
+
 ### Real profile browsing (use your own logins)
 
 By default, local browsing runs in a clean, throwaway profile — the agent is

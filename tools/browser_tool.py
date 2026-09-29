@@ -85,13 +85,13 @@ except Exception:
 try:
     from tools.url_safety import (
         _is_declared_fake_ip,
-        is_safe_url as _is_safe_url,
+        is_safe_url as _global_is_safe_url,
         is_always_blocked_url as _is_always_blocked_url,
         normalize_url_for_request as _normalize_url_for_request,
     )
 except Exception:
     _is_declared_fake_ip = lambda ip: False  # noqa: E731 — no declaration known: keep the private verdict
-    _is_safe_url = lambda url: False  # noqa: E731 — fail-closed: block all if safety module unavailable
+    _global_is_safe_url = lambda url: False  # noqa: E731 — fail-closed: block all if safety module unavailable
     _is_always_blocked_url = lambda url: True  # noqa: E731 — fail-closed on the floor too
     _normalize_url_for_request = lambda url: url  # noqa: E731 — best-effort fallback
 # Browser-provider ABC + registry; per-vendor providers live under
@@ -173,6 +173,8 @@ _cached_cloud_providers: Dict[tuple[str, tuple[int, int]], Optional[BrowserProvi
 _cloud_provider_cache_lock = threading.RLock()
 _allow_private_urls_resolved = False
 _cached_allow_private_urls: Optional[bool] = None
+_private_url_allowlist_resolved = False
+_cached_private_url_allowlist: tuple = ()
 _cached_browser_engine: Optional[str] = None  # agent-browser v0.25.3+ ``--engine lightpanda``
 _browser_engine_resolved = False
 _auto_local_for_private_urls_resolved = False
@@ -260,6 +262,15 @@ from tools import browser_tool_cdp as _cdp
 from tools import browser_tool_cloud as _cloud
 
 from tools import browser_tool_lightpanda_fallback as _lp
+
+
+def _is_safe_url(url: str) -> bool:
+    """Browser SSRF verdict: ``url_safety.is_safe_url``, or an origin named in
+    ``browser.private_url_allowlist`` that is not on the cloud-metadata floor. Every browser
+    private-address guard (navigate, redirects, current-page probes, eval/CDP literals) reads this."""
+    if _cloud._private_url_allowlisted(url) and not _is_always_blocked_url(url):
+        return True
+    return _global_is_safe_url(url)
 
 
 # Single shared real-profile copy-browser session: concurrent tasks reuse it
