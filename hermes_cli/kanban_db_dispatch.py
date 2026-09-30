@@ -2508,15 +2508,9 @@ def _rotate_worker_log(
 
 
 def _module_hermes_argv() -> list[str]:
-    """Installation-bound Hermes CLI invocation for exactly this checkout.
-
-    A bare ``sys.executable -m hermes_cli.main`` only works when ``hermes_cli``
-    is installed into that interpreter. Under the PM store runtime the launcher
-    puts the checkout on ``sys.path`` by hand, so the dispatcher can import
-    ``hermes_cli`` while a child of the same interpreter cannot. The launcher's
-    own bootstrap (``runtime_command``) carries that path into the child."""
-    from hermes_cli._launchers import runtime_command
-    return runtime_command(Path(__file__).resolve().parents[1])
+    """Interpreter-bound Hermes CLI invocation (``hermes_cli.main`` is the
+    console-script target — there is no top-level ``hermes`` package)."""
+    return [sys.executable, "-m", "hermes_cli.main"]
 
 
 def _propagate_module_import_root(cmd: list[str], env: dict[str, str]) -> None:
@@ -2600,8 +2594,8 @@ def _hermes_path_argv(path: str) -> list[str]:
 def _resolve_hermes_argv() -> list[str]:
     """Resolve the ``hermes`` invocation as argv for ``Popen``: ``$HERMES_BIN``
     (path-like -> absolute; bare names keep PATH semantics, never a
-    same-directory file), then this checkout's launcher bootstrap
-    (``_module_hermes_argv``, exactly this install; also covers shim-less cron,
+    same-directory file), then the running interpreter's ``sys.executable -m
+    hermes_cli.main`` (exactly this install; also covers shim-less cron,
     systemd ``User=``, launchd), then ``which("hermes")`` (Windows: safe PATH
     search, batch shims fall back to the module form) only when ``hermes_cli``
     is not importable. The module argv must win over PATH: a PATH-first lookup
