@@ -418,3 +418,41 @@ def test_all_providers_unreachable_returns_503(_gated_state):
     assert "unreachable" in r.text.lower()
 
 
+
+
+# ---------------------------------------------------------------------------
+# Cross-site writes (session cookies reach every port on the host)
+# ---------------------------------------------------------------------------
+
+_INSTALL = ("/api/dashboard/agent-plugins/install",
+            {"identifier": "definitely not a valid identifier", "force": False, "enable": False})
+
+
+@pytest.mark.parametrize("headers", [
+    {"Origin": "https://fly-app.fly.dev:8443"},  # another service on the same host
+    {"Origin": "null"},  # a sandboxed document
+    {"Sec-Fetch-Site": "same-site"},
+    {"Sec-Fetch-Site": "cross-site", "Origin": "https://evil.example"},
+])
+def test_cookie_writes_from_another_origin_are_refused(gated_app, headers):
+    _complete_stub_login(gated_app)
+    r = gated_app.post(_INSTALL[0], json=_INSTALL[1], headers=headers)
+    assert r.status_code == 403, r.text
+    assert r.json() == {"detail": "Cross-site request refused"}
+
+
+@pytest.mark.parametrize("headers", [
+    {"Origin": "https://fly-app.fly.dev", "Sec-Fetch-Site": "same-origin"},
+    {},  # curl and other non-browser clients send neither header
+])
+def test_cookie_writes_from_the_dashboard_itself_pass(gated_app, headers):
+    _complete_stub_login(gated_app)
+    r = gated_app.post(_INSTALL[0], json=_INSTALL[1], headers=headers)
+    assert r.status_code == 400, r.text  # reached the handler's own validation
+
+
+def test_cross_site_reads_are_not_refused(gated_app):
+    _complete_stub_login(gated_app)
+    r = gated_app.get("/api/auth/me", headers={"Origin": "https://fly-app.fly.dev:8443",
+                                               "Sec-Fetch-Site": "same-site"})
+    assert r.status_code == 200, r.text
