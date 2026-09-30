@@ -103,19 +103,26 @@ def request_is_container_proxied(request) -> bool:
     return is_container_proxy(getattr(client, "host", None), getattr(client, "port", None))
 
 
+# Node's fetch (the Electron main process, `hermes` tooling) sends `sec-fetch-mode: cors` but
+# never Origin, Sec-Fetch-Site or Sec-Fetch-Dest; browsers send Sec-Fetch-Site and
+# Sec-Fetch-Dest to localhost, and Origin on every cross-origin fetch. So those three mark a
+# browser, and Sec-Fetch-Mode alone does not.
+
+
 def request_is_cross_origin_read(request) -> bool:
-    """True for a browser fetch/XHR, which another page could read: an Origin header, or a
-    Sec-Fetch-Mode other than a navigation. The CORS policy lets any localhost origin read
-    responses, so a page served on another loopback port must not get the token that way.
-    Top-level navigations (the dashboard opened in a browser) and non-browser clients (the
-    Electron main process, curl) pass."""
+    """True for a browser fetch/XHR from another origin, which that page could read: not a
+    navigation, and an Origin header or a same-site/cross-site Sec-Fetch-Site. The CORS
+    policy lets any localhost origin read responses, so a page on another loopback port must
+    not get the token that way. Navigations (the dashboard opened in a browser), same-origin
+    fetches and non-browser clients pass."""
     headers = getattr(request, "headers", {}) or {}
-    mode = headers.get("sec-fetch-mode")
-    return bool(headers.get("origin")) or bool(mode and mode != "navigate")
+    if headers.get("sec-fetch-mode") == "navigate":
+        return False
+    return bool(headers.get("origin")) or headers.get("sec-fetch-site") in ("same-site", "cross-site")
 
 
 def request_is_from_a_browser(request) -> bool:
-    """True when any browser marker is present. The headless token page serves only the
-    Electron main process, whose fetch sends none of them."""
+    """True when a browser-only marker is present. The headless token page serves only the
+    Electron main process, whose Node fetch sends none of them."""
     headers = getattr(request, "headers", {}) or {}
-    return any(headers.get(h) for h in ("origin", "sec-fetch-mode", "sec-fetch-site", "sec-fetch-dest"))
+    return any(headers.get(h) for h in ("origin", "sec-fetch-site", "sec-fetch-dest"))

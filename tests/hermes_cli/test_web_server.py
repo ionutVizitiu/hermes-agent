@@ -5257,9 +5257,12 @@ class TestServeIndexMissingIndex:
             tmp_path, monkeypatch, write_index=True
         )
         nav = client.get("/chat", headers={"Sec-Fetch-Mode": "navigate", "Sec-Fetch-Site": "none"})
-        read = client.get("/chat", headers={"Origin": "http://127.0.0.1:8088", "Sec-Fetch-Mode": "cors"})
+        node = client.get("/", headers={"Sec-Fetch-Mode": "cors", "User-Agent": "node"})
+        read = client.get("/chat", headers={"Origin": "http://127.0.0.1:8088", "Sec-Fetch-Mode": "cors",
+                                            "Sec-Fetch-Site": "same-site"})
 
         assert 'window.__HERMES_SESSION_TOKEN__="nav-only"' in nav.text
+        assert 'window.__HERMES_SESSION_TOKEN__="nav-only"' in node.text  # SSH remote adoption
         assert "nav-only" not in read.text
 
     def test_index_uses_ssh_token_applied_after_spa_mount(
@@ -5351,6 +5354,14 @@ class TestHeadlessServeTokenPage:
         assert resp.status_code == 404
         assert ws._SESSION_TOKEN not in resp.text
         assert "__HERMES_SESSION_TOKEN__" not in resp.text
+
+    def test_root_serves_token_to_node_fetch(self, monkeypatch):
+        # The headers Node's fetch sends (the Electron main process), measured.
+        client, ws = self._headless_client(monkeypatch, gated=False)
+        resp = client.get("/", headers={"Accept": "*/*", "Accept-Language": "*",
+                                        "Sec-Fetch-Mode": "cors", "User-Agent": "node"})
+        assert resp.status_code == 200
+        assert ws._SESSION_TOKEN in resp.text
 
     @pytest.mark.parametrize("headers", [
         {"Origin": "http://127.0.0.1:8088"},

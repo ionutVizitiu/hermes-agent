@@ -80,11 +80,19 @@ def test_ipv4_mapped_loopback_is_checked(monkeypatch):
     assert po.is_container_proxy("::ffff:127.0.0.1", 50004)
 
 
+# What Node's fetch actually sends (measured): the Electron main process must pass.
+NODE_FETCH = {"accept": "*/*", "accept-language": "*", "sec-fetch-mode": "cors", "user-agent": "node"}
+
+
 def test_browser_markers():
     req = lambda **h: SimpleNamespace(headers=h)
-    assert po.request_is_from_a_browser(req(**{"sec-fetch-mode": "navigate"}))
+    assert po.request_is_from_a_browser(req(**{"sec-fetch-site": "none", "sec-fetch-dest": "document"}))
+    assert po.request_is_from_a_browser(req(origin="http://127.0.0.1:8088"))
+    assert not po.request_is_from_a_browser(req(**NODE_FETCH))
     assert not po.request_is_from_a_browser(req())
     assert po.request_is_cross_origin_read(req(origin="http://127.0.0.1:8088"))
-    assert po.request_is_cross_origin_read(req(**{"sec-fetch-mode": "cors"}))
-    assert not po.request_is_cross_origin_read(req(**{"sec-fetch-mode": "navigate"}))
+    assert po.request_is_cross_origin_read(req(**{"sec-fetch-mode": "cors", "sec-fetch-site": "same-site"}))
+    assert not po.request_is_cross_origin_read(req(**{"sec-fetch-mode": "cors", "sec-fetch-site": "same-origin"}))
+    assert not po.request_is_cross_origin_read(req(**{"sec-fetch-mode": "navigate", "sec-fetch-site": "cross-site"}))
+    assert not po.request_is_cross_origin_read(req(**NODE_FETCH))
     assert not po.request_is_cross_origin_read(req())
