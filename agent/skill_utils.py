@@ -818,7 +818,7 @@ def extract_support_file_description(path, max_len: int = 200) -> str:
     """
     try:
         p = Path(path)
-        with open(p, "r", encoding="utf-8", errors="replace") as fh:
+        with open(p, "r", encoding="utf-8-sig", errors="replace") as fh:
             head = fh.read(_SUPPORT_DESC_HEAD_BYTES)
     except (OSError, ValueError):
         return ""

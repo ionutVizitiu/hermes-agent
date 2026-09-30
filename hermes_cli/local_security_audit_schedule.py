@@ -201,7 +201,7 @@ def install_launchd_schedule(args: argparse.Namespace) -> dict[str, Any]:
     loaded = False
     message = "plist written"
     if not bool(getattr(args, "no_load", False)):
-        uid = os.getuid()
+        uid = os.getuid()  # windows-footgun: ok — launchd scheduling, macOS only
         subprocess.run(["launchctl", "bootout", f"gui/{uid}", str(plist_path)], check=False, capture_output=True, text=True, encoding="utf-8", errors="replace")
         proc = subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", str(plist_path)], check=False, capture_output=True, text=True, encoding="utf-8", errors="replace")
         loaded = proc.returncode == 0
@@ -222,7 +222,7 @@ def uninstall_launchd_schedule(args: argparse.Namespace) -> dict[str, Any]:
     plist_path = Path(getattr(args, "plist_path", None) or default_launch_agent_path()).expanduser()
     bootout_returncode = None
     if shutil.which("launchctl"):
-        uid = os.getuid()
+        uid = os.getuid()  # windows-footgun: ok — launchd scheduling, macOS only
         bootout = subprocess.run(["launchctl", "bootout", f"gui/{uid}", str(plist_path)], check=False, capture_output=True, text=True, encoding="utf-8", errors="replace")
         bootout_returncode = bootout.returncode
     existed = plist_path.exists()
@@ -242,7 +242,7 @@ def schedule_status(args: argparse.Namespace) -> dict[str, Any]:
     latest = sorted(report_dir.glob("local-security-audit-*.json"), key=lambda p: p.stat().st_mtime, reverse=True)[:1] if report_dir.exists() else []
     loaded = False
     if shutil.which("launchctl"):
-        uid = os.getuid()
+        uid = os.getuid()  # windows-footgun: ok — launchd scheduling, macOS only
         proc = subprocess.run(["launchctl", "print", f"gui/{uid}/{LABEL}"], check=False, capture_output=True, text=True, encoding="utf-8", errors="replace")
         loaded = proc.returncode == 0
     return {

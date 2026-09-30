@@ -155,7 +155,7 @@ def _parse_yaml(path: Path) -> dict[str, Any]:
     except Exception:
         return {}
     try:
-        data = yaml.safe_load(path.read_text(encoding="utf-8", errors="replace"))
+        data = yaml.safe_load(path.read_text(encoding="utf-8-sig", errors="replace"))
     except Exception:
         return {}
     return data if isinstance(data, dict) else {}
@@ -329,7 +329,7 @@ def check_secret_scan(hermes_home: Path, max_file_bytes: int = 2_000_000) -> Aud
                 if path.stat().st_size > max_file_bytes:
                     skipped_large += 1
                     continue
-                text = path.read_text(encoding="utf-8", errors="ignore")
+                text = path.read_text(encoding="utf-8-sig", errors="ignore")
             except Exception:
                 continue
             scanned_files += 1
@@ -447,7 +447,7 @@ def check_gateway_status(hermes_home: Path) -> AuditSection:
     pid: int | None = None
     if pid_file.exists():
         try:
-            raw = pid_file.read_text().strip()
+            raw = pid_file.read_text(encoding="utf-8-sig").strip()
             try:
                 pid = int(raw)
             except ValueError:
