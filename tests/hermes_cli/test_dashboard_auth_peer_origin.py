@@ -71,3 +71,20 @@ def test_real_loopback_connection_resolves_to_this_process():
         cli.close()
         conn.close()
         srv.close()
+
+
+def test_ipv4_mapped_loopback_is_checked(monkeypatch):
+    stdout = "p1\nccom.docker.backend\nn[::ffff:127.0.0.1]:50004->[::ffff:127.0.0.1]:63544\n"
+    monkeypatch.setattr(po.shutil, "which", lambda name: "/usr/sbin/lsof")
+    monkeypatch.setattr(po.subprocess, "run", _lsof(stdout))
+    assert po.is_container_proxy("::ffff:127.0.0.1", 50004)
+
+
+def test_browser_markers():
+    req = lambda **h: SimpleNamespace(headers=h)
+    assert po.request_is_from_a_browser(req(**{"sec-fetch-mode": "navigate"}))
+    assert not po.request_is_from_a_browser(req())
+    assert po.request_is_cross_origin_read(req(origin="http://127.0.0.1:8088"))
+    assert po.request_is_cross_origin_read(req(**{"sec-fetch-mode": "cors"}))
+    assert not po.request_is_cross_origin_read(req(**{"sec-fetch-mode": "navigate"}))
+    assert not po.request_is_cross_origin_read(req())

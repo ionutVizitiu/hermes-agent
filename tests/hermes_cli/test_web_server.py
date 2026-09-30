@@ -5247,6 +5247,21 @@ class TestServeIndexMissingIndex:
         assert "must-not-leak" not in resp.text
         assert "__HERMES_SESSION_TOKEN__" not in resp.text
 
+    def test_index_token_only_for_navigations_not_cross_origin_reads(
+        self, tmp_path, monkeypatch
+    ):
+        import hermes_cli.web_server as ws
+
+        monkeypatch.setattr(ws, "_SESSION_TOKEN", "nav-only")
+        client, _dist = self._client_with_dist(
+            tmp_path, monkeypatch, write_index=True
+        )
+        nav = client.get("/chat", headers={"Sec-Fetch-Mode": "navigate", "Sec-Fetch-Site": "none"})
+        read = client.get("/chat", headers={"Origin": "http://127.0.0.1:8088", "Sec-Fetch-Mode": "cors"})
+
+        assert 'window.__HERMES_SESSION_TOKEN__="nav-only"' in nav.text
+        assert "nav-only" not in read.text
+
     def test_index_uses_ssh_token_applied_after_spa_mount(
         self, tmp_path, monkeypatch
     ):
@@ -5336,6 +5351,17 @@ class TestHeadlessServeTokenPage:
         assert resp.status_code == 404
         assert ws._SESSION_TOKEN not in resp.text
         assert "__HERMES_SESSION_TOKEN__" not in resp.text
+
+    @pytest.mark.parametrize("headers", [
+        {"Origin": "http://127.0.0.1:8088"},
+        {"Sec-Fetch-Mode": "cors", "Sec-Fetch-Site": "same-site"},
+        {"Sec-Fetch-Mode": "navigate", "Sec-Fetch-Dest": "document"},
+    ])
+    def test_root_withholds_token_from_browsers(self, monkeypatch, headers):
+        client, ws = self._headless_client(monkeypatch, gated=False)
+        resp = client.get("/", headers=headers)
+        assert resp.status_code == 404
+        assert ws._SESSION_TOKEN not in resp.text
 
     def test_root_stays_404_json_when_auth_gated(self, monkeypatch):
         client, ws = self._headless_client(monkeypatch, gated=True)

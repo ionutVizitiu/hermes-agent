@@ -29,6 +29,9 @@ PROXY_COMMAND_PREFIXES = (
     "limactl",  # Lima, Colima, Rancher Desktop
     "gvproxy",  # Podman machine
     "qemu-system",
+    "vmnet-natd",  # VMware Fusion NAT
+    "prl_naptd",  # Parallels NAT
+    "com.apple.Virtualization",
 )
 _LSOF_TIMEOUT_SECONDS = 2.0
 _warned_no_lsof = False
@@ -36,9 +39,11 @@ _warned_no_lsof = False
 
 def _is_loopback(host: str) -> bool:
     try:
-        return ipaddress.ip_address(host.split("%", 1)[0]).is_loopback
+        ip = ipaddress.ip_address(host.split("%", 1)[0])
     except ValueError:
         return False
+    mapped = getattr(ip, "ipv4_mapped", None)  # ::ffff:127.0.0.1 on a dual-stack bind
+    return (mapped or ip).is_loopback
 
 
 def _lsof_endpoint(host: str, port: int) -> str:
@@ -96,3 +101,21 @@ def is_container_proxy(client_host: Optional[str], client_port: Optional[int]) -
 def request_is_container_proxied(request) -> bool:
     client = getattr(request, "client", None)
     return is_container_proxy(getattr(client, "host", None), getattr(client, "port", None))
+
+
+def request_is_cross_origin_read(request) -> bool:
+    """True for a browser fetch/XHR, which another page could read: an Origin header, or a
+    Sec-Fetch-Mode other than a navigation. The CORS policy lets any localhost origin read
+    responses, so a page served on another loopback port must not get the token that way.
+    Top-level navigations (the dashboard opened in a browser) and non-browser clients (the
+    Electron main process, curl) pass."""
+    headers = getattr(request, "headers", {}) or {}
+    mode = headers.get("sec-fetch-mode")
+    return bool(headers.get("origin")) or bool(mode and mode != "navigate")
+
+
+def request_is_from_a_browser(request) -> bool:
+    """True when any browser marker is present. The headless token page serves only the
+    Electron main process, whose fetch sends none of them."""
+    headers = getattr(request, "headers", {}) or {}
+    return any(headers.get(h) for h in ("origin", "sec-fetch-mode", "sec-fetch-site", "sec-fetch-dest"))
