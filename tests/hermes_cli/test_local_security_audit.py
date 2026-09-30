@@ -131,6 +131,7 @@ def test_cmd_json_exit_code_only_fails_with_flag(monkeypatch, tmp_path: Path, ca
 
 HOST = "mac.tail0.ts.net"
 POLICY = """
+listeners_allowed: [rapportd]
 serve:
   443: {name: bookmarks, upstream: "http://127.0.0.1:3000", probes: [{path: /api/v1/x, expect: [401]}]}
   8444:
@@ -165,7 +166,7 @@ def _patch_tailnet(monkeypatch, tmp_path: Path, serve: dict, *, status: dict | N
     if policy is not None:
         (tmp_path / "security").mkdir(exist_ok=True)
         (tmp_path / "security" / "tailnet-exposure.yaml").write_text(policy, encoding="utf-8")
-    monkeypatch.setattr(lsa, "_tailnet_state", lambda: (HOST, status or _status(), serve, ""))
+    monkeypatch.setattr(lsa, "_tailnet_state", lambda: (HOST, status or _status(), serve, "", ""))
     monkeypatch.setattr(lsa, "_tailscale_cli", lambda: "tailscale")
     monkeypatch.setattr(lsa, "_json_command", lambda cmd: (prefs if prefs is not None else {"RunSSH": False}, ""))
     monkeypatch.setattr(lsa, "_run", lambda cmd, timeout=20, env=None: {
@@ -197,7 +198,7 @@ def test_run_local_audit_only_runs_the_named_sections(monkeypatch, tmp_path: Pat
 
 def test_tailnet_exposure_passes_for_reviewed_loopback_services(monkeypatch, tmp_path: Path):
     _patch_tailnet(monkeypatch, tmp_path, _serve(("443", "http://127.0.0.1:3000"), ("8444", "http://127.0.0.1:9119")),
-                   lsof=_lsof("127.0.0.1:3000", "127.0.0.1:9119", "*:5000"))
+                   lsof=_lsof("127.0.0.1:3000", "127.0.0.1:9119"))
 
     section = lsa.check_tailnet_exposure(tmp_path)
 
@@ -244,16 +245,25 @@ def test_tailnet_exposure_warns_on_other_users_devices(monkeypatch, tmp_path: Pa
 
 
 def test_tailnet_exposure_is_info_without_tailscale(monkeypatch, tmp_path: Path):
-    monkeypatch.setattr(lsa, "_tailnet_state", lambda: ("", {}, {}, "Tailscale CLI not found; nothing is served on a tailnet."))
+    monkeypatch.setattr(lsa, "_tailnet_state", lambda: ("", {}, {}, "Tailscale CLI not found; nothing is served on a tailnet.", "info"))
     assert lsa.check_tailnet_exposure(tmp_path).status == "info"
     assert lsa.check_tailnet_login_gates(tmp_path).status == "info"
+
+
+def test_tailnet_sections_warn_with_an_item_when_the_cli_fails(monkeypatch, tmp_path: Path):
+    reason = "`tailscale status` failed, so what is served is unknown: boom"
+    monkeypatch.setattr(lsa, "_tailnet_state", lambda: ("", {}, {}, reason, "warn"))
+    for check in (lsa.check_tailnet_exposure, lsa.check_tailnet_login_gates):
+        section = check(tmp_path)
+        assert section.status == "warn"
+        assert section.data["warnings"] == [reason]
 
 
 def test_login_gates_fail_on_unexpected_2xx_and_pass_redirects(monkeypatch, tmp_path: Path):
     _patch_tailnet(monkeypatch, tmp_path, _serve(("443", "http://127.0.0.1:3000"), ("8444", "http://127.0.0.1:9119")))
     seen = []
 
-    def probe(url, host_header=None, timeout=10):
+    def probe(url, host_header=None, method="GET", headers=None, timeout=10):
         seen.append((url, host_header))
         if url.endswith("/kanban"):
             return 302, f"https://{HOST}:8444/login?next=%2Fkanban", ""
@@ -273,13 +283,15 @@ def test_login_gates_fail_on_unexpected_2xx_and_pass_redirects(monkeypatch, tmp_
 
 def test_login_gates_warn_when_a_service_does_not_answer(monkeypatch, tmp_path: Path):
     _patch_tailnet(monkeypatch, tmp_path, _serve(("8444", "http://127.0.0.1:9119")))
-    monkeypatch.setattr(lsa, "_http_probe", lambda url, host_header=None, timeout=10: (None, "", "ConnectionRefusedError"))
+    monkeypatch.setattr(lsa, "_http_probe", lambda url, host_header=None, method="GET", headers=None, timeout=10:
+                        (None, "", "ConnectionRefusedError"))
 
     section = lsa.check_tailnet_login_gates(tmp_path)
 
     assert section.status == "warn"
     assert section.data["failures"] == []
     assert any("no answer" in w for w in section.data["warnings"])
+    assert "no probe got an answer, so the login gates went unchecked this run" in section.data["warnings"]
 
 
 def test_http_probe_resolves_relative_location(monkeypatch):
@@ -296,8 +308,8 @@ def test_http_probe_resolves_relative_location(monkeypatch):
         def __init__(self, *a, **k):
             self.sent = None
 
-        def request(self, method, target, headers=None):
-            assert (method, target, headers) == ("GET", "/kanban", {})
+        def request(self, method, target, body=None, headers=None):
+            assert (method, target, body, headers) == ("GET", "/kanban", None, {})
 
         def getresponse(self):
             return Resp()
@@ -315,3 +327,70 @@ def test_text_report_keeps_problem_lines_out_unless_asked():
         "data": {"problems": [f"Funnel is on for {HOST}:443"]}, "errors": []}]}
     assert HOST not in lsa._render_human(report)
     assert f"- Funnel is on for {HOST}:443" in lsa._render_human(report, details=True)
+
+
+
+def test_tailnet_exposure_fails_on_unlisted_listeners_and_risky_prefs(monkeypatch, tmp_path: Path):
+    _patch_tailnet(monkeypatch, tmp_path, _serve(("443", "http://127.0.0.1:3000"), ("8444", "http://127.0.0.1:9119")),
+                   lsof=_lsof("127.0.0.1:3000", "127.0.0.1:9119", "*:9631", "*:51057"),
+                   prefs={"RunSSH": False, "RunWebClient": True, "AdvertiseRoutes": ["192.168.0.0/24"]})
+    # _lsof names every process "proc"; allow it once to see the prefs alone, then not.
+    section = lsa.check_tailnet_exposure(tmp_path)
+    problems = "\n".join(section.data["problems"])
+
+    assert "proc listens on *:9631" in problems and "not in listeners_allowed" in problems
+    assert "web client is on" in problems
+    assert "advertises routes 192.168.0.0/24" in problems
+
+
+def test_login_gates_fail_without_a_policy(monkeypatch, tmp_path: Path):
+    _patch_tailnet(monkeypatch, tmp_path, _serve(("8444", "http://127.0.0.1:9119")), policy=None)
+
+    section = lsa.check_tailnet_login_gates(tmp_path)
+
+    assert section.status == "fail"
+    assert "no login gate was checked" in section.data["failures"][0]
+
+
+def test_login_gates_probe_unlisted_ports_and_honour_method_headers_fail_on(monkeypatch, tmp_path: Path):
+    policy = POLICY.replace("probes: [{path: /api/v1/x, expect: [401]}]",
+                            'probes: [{path: /api/events, headers: {Upgrade: websocket, Origin: "https://{host}"}, '
+                            'expect: [401, 403], fail_on: [101]}, {path: /w, method: POST, expect: [401]}]')
+    _patch_tailnet(monkeypatch, tmp_path, _serve(("443", "http://127.0.0.1:3000"), ("8444", "http://127.0.0.1:9119"),
+                                               ("10000", "http://127.0.0.1:7000")), policy=policy)
+    seen = []
+
+    def probe(url, host_header=None, method="GET", headers=None, timeout=10):
+        seen.append((method, url, headers))
+        if url.endswith("/api/events"):
+            return 101, "", ""
+        if url.endswith(":10000/"):
+            return 200, "", ""
+        if url.endswith("/kanban"):
+            return 302, f"https://{HOST}:8444/login?next=%2Fkanban", ""
+        return 401, "", ""
+
+    monkeypatch.setattr(lsa, "_http_probe", probe)
+
+    section = lsa.check_tailnet_login_gates(tmp_path)
+
+    assert section.status == "fail"
+    assert f"https://{HOST}/api/events answers 101 without a login" in section.data["failures"]
+    assert f"https://{HOST}:10000/ answers 200 without a login" in section.data["failures"]
+    assert ("GET", f"https://{HOST}/api/events", {"Upgrade": "websocket", "Origin": f"https://{HOST}"}) in seen
+    assert ("POST", f"https://{HOST}/w", {}) in seen
+
+
+def test_expand_sections_rejects_unknown_ids(capsys, tmp_path: Path):
+    import pytest
+
+    with pytest.raises(ValueError):
+        lsa.expand_sections("SEC-01O")
+    args = argparse.Namespace(json=True, minimal=False, fail_on_fail=False, only="nope", hermes_home=str(tmp_path))
+    assert lsa.cmd_local_security_audit(args) == 2
+    assert "unknown section" in capsys.readouterr().err
+
+
+def test_clip_strips_control_characters_and_long_text():
+    assert lsa._clip("a\nb\x1b[31mc") == "a b [31mc"
+    assert len(lsa._clip("x" * 500)) == 160

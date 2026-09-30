@@ -19,6 +19,7 @@ import shutil
 import ssl
 import stat
 import subprocess
+import sys
 import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -560,22 +561,36 @@ def _json_command(cmd: list[str]) -> tuple[dict[str, Any] | None, str]:
     return (data if isinstance(data, dict) else {}), ""
 
 
-def _tailnet_state() -> tuple[str, dict[str, Any], dict[str, Any], str]:
-    """(DNS name, `tailscale status --json`, `tailscale serve status --json`, reason).
-    A non-empty reason means there is nothing to check: no CLI, logged out, or stopped."""
+def _tailnet_state() -> tuple[str, dict[str, Any], dict[str, Any], str, str]:
+    """(DNS name, `tailscale status --json`, `tailscale serve status --json`, reason, level).
+    A non-empty reason means the sections cannot check anything. level "info": nothing can
+    be served (no CLI, logged out, stopped). level "warn": the CLI is there but failed, and
+    the network extension may still be serving, so the result must not read as clean."""
     cli = _tailscale_cli()
     if cli is None:
-        return "", {}, {}, "Tailscale CLI not found; nothing is served on a tailnet."
+        return "", {}, {}, "Tailscale CLI not found; nothing is served on a tailnet.", "info"
     status, err = _json_command([cli, "status", "--json"])
     if status is None:
-        return "", {}, {}, f"`tailscale status` failed: {err}"
+        return "", {}, {}, f"`tailscale status` failed, so what is served is unknown: {_clip(err)}", "warn"
     if status.get("BackendState") != "Running":
-        return "", status, {}, f"Tailscale is {status.get('BackendState') or 'not running'}; nothing is served."
+        return "", status, {}, f"Tailscale is {status.get('BackendState') or 'not running'}; nothing is served.", "info"
     serve, err = _json_command([cli, "serve", "status", "--json"])
     if serve is None:
-        return "", status, {}, f"`tailscale serve status` failed: {err}"
+        return "", status, {}, f"`tailscale serve status` failed, so what is served is unknown: {_clip(err)}", "warn"
     dns_name = str((status.get("Self") or {}).get("DNSName") or "").rstrip(".")
-    return dns_name, status, serve, ""
+    return dns_name, status, serve, "", ""
+
+
+def _unchecked(section_id: str, title: str, reason: str, level: str) -> AuditSection:
+    """A section that could not check; a warn carries the reason as an item so it is seen."""
+    return AuditSection(section_id, title, level, reason, {"warnings": [reason]} if level == "warn" else {})
+
+
+def _clip(text: Any, limit: int = 160) -> str:
+    """One line of at most *limit* printable characters, for text that comes from outside
+    (headers, error messages) and ends up in reports and prompts."""
+    cleaned = "".join(c if c.isprintable() else " " for c in str(text or ""))
+    return cleaned if len(cleaned) <= limit else cleaned[: limit - 1] + "…"
 
 
 def _load_tailnet_policy(hermes_home: Path) -> tuple[dict[str, Any], str]:
@@ -617,15 +632,17 @@ def _loopback_upstream(url: str) -> tuple[bool, int | None]:
 def check_tailnet_exposure(hermes_home: Path) -> AuditSection:
     """What `tailscale serve` publishes, against the reviewed list in the Hermes home.
 
-    Fails on Funnel (public internet), Tailscale SSH, anything served that the list does
-    not name, a served upstream that is not a loopback proxy or differs from the list,
-    and an upstream port that also listens on a non-loopback address (reachable around
-    Tailscale). Warns on tailnet devices of other users and on listed ports not served.
+    Fails on Funnel (public internet), Tailscale SSH, the web client, advertised routes or
+    services, anything served that the list does not name, a served upstream that is not
+    a loopback proxy or differs from the list, and any process listening beyond loopback
+    that the list's `listeners_allowed` does not name: tailnet peers and the LAN reach it
+    without `tailscale serve`. Warns on tailnet devices of other users and on listed ports
+    not served. `lsof` runs as this user, so root-owned listeners are not seen.
     """
     title = "Tailnet exposure"
-    dns_name, status, serve, reason = _tailnet_state()
+    dns_name, status, serve, reason, level = _tailnet_state()
     if reason:
-        return AuditSection("SEC-010", title, "info", reason)
+        return _unchecked("SEC-010", title, reason, level)
     policy, policy_error = _load_tailnet_policy(hermes_home)
     allowed = _policy_serve(policy)
     allowed_tcp = {str(k): str(v) for k, v in (policy.get("tcp_forward") or {}).items()} if isinstance(
@@ -675,22 +692,38 @@ def check_tailnet_exposure(hermes_home: Path) -> AuditSection:
             warnings.append(f":{port} ({want.get('name') or want.get('upstream')}) is in the reviewed list but not served")
 
     upstream_ports = sorted({e["upstream_port"] for e in served if e.get("upstream_port")})
+    allowed_listeners = {str(name) for name in policy.get("listeners_allowed") or []}
     listeners_result = _run(["lsof", "-nP", "-iTCP", "-sTCP:LISTEN"], timeout=30)
     if listeners_result["stdout"].strip():
         for listener in _parse_listeners(listeners_result["stdout"]):
-            if listener["port"] in upstream_ports and not listener["loopback"]:
+            if listener["loopback"]:
+                continue
+            if listener["port"] in upstream_ports:
                 problems.append(
                     f"upstream port {listener['port']} also listens on {listener['endpoint']} ({listener['process']}), "
                     "reachable without Tailscale")
-    elif upstream_ports:
-        warnings.append("could not list TCP listeners to confirm the upstreams bind loopback only")
+            elif listener["process"] not in allowed_listeners:
+                problems.append(
+                    f"{listener['process']} listens on {listener['endpoint']}: tailnet peers and the LAN reach it "
+                    "without tailscale serve, and it is not in listeners_allowed")
+    else:
+        warnings.append("could not list TCP listeners to confirm nothing else listens beyond loopback")
 
     prefs, prefs_error = _json_command([_tailscale_cli() or "tailscale", "debug", "prefs"])
     tailscale_ssh = bool((prefs or {}).get("RunSSH"))
     if prefs is None:
-        warnings.append(f"could not read Tailscale prefs: {prefs_error}")
-    elif tailscale_ssh and not policy.get("allow_tailscale_ssh"):
-        problems.append("Tailscale SSH is on: tailnet devices the ACL allows can open a shell on this machine")
+        warnings.append(f"could not read Tailscale prefs: {_clip(prefs_error)}")
+    else:
+        if tailscale_ssh and not policy.get("allow_tailscale_ssh"):
+            problems.append("Tailscale SSH is on: tailnet devices the ACL allows can open a shell on this machine")
+        if prefs.get("RunWebClient"):
+            problems.append("the Tailscale web client is on: tailnet devices can change this machine's Tailscale settings")
+        if prefs.get("AdvertiseRoutes"):
+            problems.append("this machine advertises routes %s: tailnet devices can reach those networks (or use it as an "
+                            "exit node) through it" % ", ".join(map(str, prefs["AdvertiseRoutes"])))
+        if prefs.get("AdvertiseServices"):
+            problems.append("this machine advertises Tailscale Services %s, which are not reviewed"
+                            % ", ".join(map(str, prefs["AdvertiseServices"])))
 
     self_node = status.get("Self") or {}
     users = status.get("User") or {}
@@ -726,8 +759,9 @@ def check_tailnet_exposure(hermes_home: Path) -> AuditSection:
     return AuditSection("SEC-010", title, status_value, summary, data)
 
 
-def _http_probe(url: str, host_header: str | None = None, timeout: int = 10) -> tuple[int | None, str, str]:
-    """(status, absolute Location, error) for one GET without cookies; redirects are not followed."""
+def _http_probe(url: str, host_header: str | None = None, method: str = "GET",
+                headers: dict[str, str] | None = None, timeout: int = 10) -> tuple[int | None, str, str]:
+    """(status, absolute Location, error) for one request without cookies; redirects are not followed."""
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme == "https":
         conn: http.client.HTTPConnection = http.client.HTTPSConnection(
@@ -736,13 +770,14 @@ def _http_probe(url: str, host_header: str | None = None, timeout: int = 10) -> 
         conn = http.client.HTTPConnection(parsed.hostname or "", parsed.port or 80, timeout=timeout)
     target = (parsed.path or "/") + (f"?{parsed.query}" if parsed.query else "")
     try:
-        conn.request("GET", target, headers={"Host": host_header} if host_header else {})
+        conn.request(method, target, body=b"" if method == "POST" else None,
+                     headers={**(headers or {}), **({"Host": host_header} if host_header else {})})
         resp = conn.getresponse()
         resp.read(65536)
         location = resp.getheader("Location") or ""
-        return resp.status, urllib.parse.urljoin(url, location) if location else "", ""
+        return resp.status, _clip(urllib.parse.urljoin(url, location), 300) if location else "", ""
     except (OSError, http.client.HTTPException) as exc:
-        return None, "", f"{type(exc).__name__}: {exc}"[:200]
+        return None, "", _clip(f"{type(exc).__name__}: {exc}", 200)
     finally:
         conn.close()
 
@@ -750,40 +785,52 @@ def _http_probe(url: str, host_header: str | None = None, timeout: int = 10) -> 
 def check_tailnet_login_gates(hermes_home: Path) -> AuditSection:
     """Unauthenticated requests through the tailnet URLs, from the reviewed list's `probes`.
 
-    Fails when a probe gets a 2xx it did not expect: that page or API answers without a
-    login. Warns on other unexpected answers (a service down, a redirect somewhere else)
-    and on served ports the list gives no probes for.
+    Each probe is `{path, expect}` (served ports) or `{url, host, expect}` (loopback_probes),
+    with optional `method`, `headers` and `fail_on`. A probe fails when it gets a 2xx it
+    does not expect, or a status in its `fail_on` (e.g. 101 for a WebSocket upgrade): that
+    page or API answers without a login. Every served port the list does not name gets a
+    `GET /` that fails on any 2xx. Other unexpected answers warn, as does a run in which
+    no probe got an answer (the gates went unchecked).
     """
     title = "Tailnet login gates"
-    dns_name, _status, serve, reason = _tailnet_state()
+    dns_name, _status, serve, reason, level = _tailnet_state()
     if reason:
-        return AuditSection("SEC-011", title, "info", reason)
+        return _unchecked("SEC-011", title, reason, level)
     policy, policy_error = _load_tailnet_policy(hermes_home)
     if policy_error:
-        return AuditSection("SEC-011", title, "warn", f"No probes to run: {policy_error}.")
+        failure = f"no reviewed exposure list ({policy_error}), so no login gate was checked"
+        return AuditSection("SEC-011", title, "fail", failure, {"failures": [failure], "warnings": [], "probes": []})
     served_ports = {hp.rsplit(":", 1)[-1] for cfg in _serve_configs(serve) for hp in (cfg.get("Web") or {})}
+    listed = _policy_serve(policy)
+
+    def fill(value: Any) -> str:
+        return str(value).replace("{host}", dns_name)
 
     jobs: list[tuple[str, str | None, dict[str, Any]]] = []
     warnings: list[str] = []
-    for port, entry in sorted(_policy_serve(policy).items()):
-        if port not in served_ports:
+    for port in sorted(served_ports):
+        base = f"https://{dns_name}" + ("" if port == "443" else f":{port}")
+        if port not in listed:
+            jobs.append((base + "/", None, {"expect": []}))
             continue
-        probes = [pr for pr in (entry.get("probes") or []) if isinstance(pr, dict) and pr.get("path")]
+        probes = [pr for pr in (listed[port].get("probes") or []) if isinstance(pr, dict) and pr.get("path")]
         if not probes:
             warnings.append(f":{port} is served but the reviewed list has no probes for it")
-        base = f"https://{dns_name}" + ("" if port == "443" else f":{port}")
         jobs.extend((base + str(pr["path"]), None, pr) for pr in probes)
     for pr in policy.get("loopback_probes") or []:
         if isinstance(pr, dict) and pr.get("url"):
-            jobs.append((str(pr["url"]), str(pr.get("host") or "{host}").replace("{host}", dns_name), pr))
+            jobs.append((str(pr["url"]), fill(pr.get("host") or "{host}"), pr))
 
     results: list[dict[str, Any]] = []
     failures: list[str] = []
     for url, host_header, probe in jobs:
         expect = [int(code) for code in (probe.get("expect") or [])]
-        code, location, error = _http_probe(url, host_header)
-        label = url + (f" (Host {host_header})" if host_header else "")
-        want_location = str(probe.get("location") or "").replace("{host}", dns_name)
+        fail_on = [int(code) for code in (probe.get("fail_on") or [])]
+        method = str(probe.get("method") or "GET").upper()
+        headers = {str(k): fill(v) for k, v in (probe.get("headers") or {}).items()}
+        code, location, error = _http_probe(url, host_header, method, headers)
+        label = (f"{method} " if method != "GET" else "") + url + (f" (Host {host_header})" if host_header else "")
+        want_location = fill(probe.get("location") or "")
         note = ""
         if code is None:
             note = f"no answer: {error}"
@@ -791,11 +838,14 @@ def check_tailnet_login_gates(hermes_home: Path) -> AuditSection:
             note = f"answered {code}, expected {'/'.join(map(str, expect)) or 'a refusal'}"
         elif want_location and not location.startswith(want_location):
             note = f"redirects to {location or 'nowhere'}, expected {want_location}…"
-        if code is not None and 200 <= code < 300 and code not in expect:
+        if code is not None and ((200 <= code < 300 and code not in expect) or code in fail_on):
             failures.append(f"{label} answers {code} without a login")
         elif note:
             warnings.append(f"{label} {note}")
-        results.append({"url": url, "host": host_header, "status": code, "expected": expect, "ok": not note})
+        results.append({"url": url, "method": method, "host": host_header, "status": code, "expected": expect,
+                        "ok": not note})
+    if results and all(r["status"] is None for r in results):
+        warnings.append("no probe got an answer, so the login gates went unchecked this run")
 
     status_value = "fail" if failures else "warn" if warnings else "pass"
     if failures:
@@ -825,14 +875,22 @@ def _section_checks(home: Path, include_optional: bool) -> list[tuple[str, Calla
     return checks
 
 
+KNOWN_SECTIONS = {f"SEC-{n:03d}" for n in range(1, 12)}
+
+
 def expand_sections(only: str | None) -> set[str] | None:
-    """`--only` value ("tailnet", "SEC-010,SEC-004", ...) as a set of section ids, or None."""
+    """`--only` value ("tailnet", "SEC-010,SEC-004", ...) as a set of section ids, or None.
+    Raises ValueError on an unknown id, so a typo cannot run nothing and report a pass."""
     if not only:
         return None
     ids: set[str] = set()
     for item in (part.strip() for part in only.split(",")):
         if item:
             ids.update(SECTION_GROUPS.get(item.lower(), (item.upper(),)))
+    unknown = sorted(ids - KNOWN_SECTIONS)
+    if unknown or not ids:
+        raise ValueError(f"unknown section(s) for --only: {', '.join(unknown) or only!r}; "
+                         f"use ids SEC-001..SEC-011 or: {', '.join(sorted(SECTION_GROUPS))}")
     return ids
 
 
@@ -885,7 +943,11 @@ def _render_human(report: dict[str, Any], details: bool = False) -> str:
 
 def cmd_local_security_audit(args: argparse.Namespace) -> int:
     home = Path(getattr(args, "hermes_home", None) or get_hermes_home()).expanduser()
-    only = expand_sections(getattr(args, "only", None))
+    try:
+        only = expand_sections(getattr(args, "only", None))
+    except ValueError as exc:
+        print(f"hermes security local-audit: {exc}", file=sys.stderr)
+        return 2
     report = run_local_audit(home, include_optional=not bool(getattr(args, "minimal", False)), only=only)
     if bool(getattr(args, "json", False)):
         print(json.dumps(report, indent=2, sort_keys=True))
