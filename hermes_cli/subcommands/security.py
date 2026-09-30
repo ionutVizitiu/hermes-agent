@@ -40,7 +40,9 @@ def build_security_parser(subparsers, *, cmd_security: Callable) -> None:
             "Collect local-only security posture checks: cached macOS updates, "
             "Homebrew outdated packages without auto-update, listening services, "
             "Hermes secret-scan counts, sensitive file modes, gateway status, "
-            "and terminal backend containerization. Does not contact remote services."
+            "terminal backend containerization, and what Tailscale serves (reviewed list, "
+            "Funnel, login probes against this machine's own tailnet name). "
+            "Does not contact remote services."
         ),
     )
     local_audit_parser.add_argument(
@@ -57,6 +59,12 @@ def build_security_parser(subparsers, *, cmd_security: Callable) -> None:
         "--fail-on-fail",
         action="store_true",
         help="Exit 1 when any required/actionable section reports FAIL",
+    )
+    local_audit_parser.add_argument(
+        "--only",
+        default=None,
+        metavar="SECTIONS",
+        help="Run only these comma-separated section ids (e.g. SEC-010) or groups (tailnet = SEC-010,SEC-011)",
     )
     local_audit_parser.add_argument(
         "--hermes-home",

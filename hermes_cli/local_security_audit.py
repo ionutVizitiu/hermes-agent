@@ -3,21 +3,26 @@
 This module backs ``hermes security local-audit``. It intentionally avoids
 network-backed checks: no OSV, no brew update, no softwareupdate scan, no paste
 upload, no gateway send smoke test. It reports local state only, with sanitized
-counts and paths.
+counts and paths. The tailnet sections (SEC-010, SEC-011) talk only to this
+machine: the local tailscaled, and its own tailnet name for the login probes.
 """
 
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import os
 import platform
 import re
+import shutil
+import ssl
 import stat
 import subprocess
+import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from hermes_constants import get_hermes_home
 
@@ -71,6 +76,14 @@ SECRET_FIXTURE_FILENAMES = {".env.example", "redact.py", ".gitleaksignore"}
 # a loosely-permissioned copy still counts as a live match.
 SECRET_STORE_FILENAMES = {".env", "auth.json", "nous_auth.json", "config.yaml"}
 
+# Tailnet exposure (SEC-010, SEC-011). The reviewed list of what `tailscale serve` may
+# publish, and the unauthenticated requests each served port must refuse, lives in the
+# Hermes home; anything served that it does not list fails the audit.
+TAILNET_POLICY_RELATIVE_PATH = Path("security") / "tailnet-exposure.yaml"
+TAILSCALE_APP_CLI = "/Applications/Tailscale.app/Contents/MacOS/Tailscale"
+LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+SECTION_GROUPS = {"tailnet": ("SEC-010", "SEC-011")}
+
 SENSITIVE_RELATIVE_PATHS = [
     "config.yaml",
     ".env",
@@ -105,6 +118,8 @@ def _run(cmd: list[str], timeout: int = 20, env: dict[str, str] | None = None) -
         proc = subprocess.run(
             cmd,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             capture_output=True,
             timeout=timeout,
             env=env,
@@ -220,6 +235,26 @@ def check_brew_updates() -> AuditSection:
     )
 
 
+def _parse_listeners(lsof_stdout: str) -> list[dict[str, Any]]:
+    """One dict per `lsof -nP -iTCP -sTCP:LISTEN` line: process, pid, user, endpoint, port,
+    and whether the bind is loopback or all interfaces."""
+    services: list[dict[str, Any]] = []
+    for line in lsof_stdout.splitlines()[1:]:
+        parts = line.split()
+        if len(parts) < 9:
+            continue
+        name, pid, user = parts[0], parts[1], parts[2]
+        endpoint = parts[-2] if parts[-1] == "(LISTEN)" else parts[-1]
+        bind, _, port = endpoint.rpartition(":")
+        loopback = bind in {"127.0.0.1", "[::1]", "localhost"} or bind.endswith(".localhost")
+        all_interfaces = bind in {"*", "0.0.0.0", "[::]"}
+        services.append({
+            "process": name, "pid": pid, "user": user, "endpoint": endpoint,
+            "port": int(port) if port.isdigit() else None, "loopback": loopback, "all_interfaces": all_interfaces,
+        })
+    return services
+
+
 def check_listening_services() -> AuditSection:
     result = _run(["lsof", "-nP", "-iTCP", "-sTCP:LISTEN"], timeout=30)
     if result["missing"]:
@@ -233,19 +268,7 @@ def check_listening_services() -> AuditSection:
             {"returncode": result["returncode"]},
             [result["stderr"].strip()[:500]] if result["stderr"].strip() else [],
         )
-    services: list[dict[str, Any]] = []
-    for line in result["stdout"].splitlines()[1:]:
-        parts = line.split()
-        if len(parts) < 9:
-            continue
-        name, pid, user = parts[0], parts[1], parts[2]
-        endpoint = parts[-2] if parts[-1] == "(LISTEN)" else parts[-1]
-        bind = endpoint.rsplit(":", 1)[0]
-        loopback = bind in {"127.0.0.1", "[::1]", "localhost"} or bind.endswith(".localhost")
-        all_interfaces = bind in {"*", "0.0.0.0", "[::]"}
-        services.append(
-            {"process": name, "pid": pid, "user": user, "endpoint": endpoint, "loopback": loopback, "all_interfaces": all_interfaces}
-        )
+    services = _parse_listeners(result["stdout"])
     exposed = [s for s in services if s["all_interfaces"] or not s["loopback"]]
     status = "warn" if exposed else "pass"
     summary = f"{len(services)} listener(s), {len(exposed)} non-loopback/all-interface listener(s)."
@@ -518,19 +541,307 @@ def check_git_backup_exposure(hermes_home: Path) -> AuditSection:
     )
 
 
-def run_local_audit(hermes_home: Path | None = None, include_optional: bool = True) -> dict[str, Any]:
-    home = hermes_home or Path(get_hermes_home())
-    sections = [
-        check_os_updates(),
-        check_brew_updates(),
-        check_listening_services(),
-        check_secret_scan(home),
-        check_file_modes(home),
-        check_gateway_status(home),
-        check_terminal_containerization(home),
+def _tailscale_cli() -> str | None:
+    found = shutil.which("tailscale")
+    if found:
+        return found
+    return TAILSCALE_APP_CLI if os.access(TAILSCALE_APP_CLI, os.X_OK) else None
+
+
+def _json_command(cmd: list[str]) -> tuple[dict[str, Any] | None, str]:
+    """Parsed JSON object printed by *cmd*, or (None, reason)."""
+    result = _run(cmd, timeout=20)
+    if not result["ok"]:
+        return None, (result["stderr"] or result["stdout"] or "command failed").strip()[:300]
+    try:
+        data = json.loads(result["stdout"] or "{}")
+    except ValueError as exc:
+        return None, f"unparsable JSON: {exc}"
+    return (data if isinstance(data, dict) else {}), ""
+
+
+def _tailnet_state() -> tuple[str, dict[str, Any], dict[str, Any], str]:
+    """(DNS name, `tailscale status --json`, `tailscale serve status --json`, reason).
+    A non-empty reason means there is nothing to check: no CLI, logged out, or stopped."""
+    cli = _tailscale_cli()
+    if cli is None:
+        return "", {}, {}, "Tailscale CLI not found; nothing is served on a tailnet."
+    status, err = _json_command([cli, "status", "--json"])
+    if status is None:
+        return "", {}, {}, f"`tailscale status` failed: {err}"
+    if status.get("BackendState") != "Running":
+        return "", status, {}, f"Tailscale is {status.get('BackendState') or 'not running'}; nothing is served."
+    serve, err = _json_command([cli, "serve", "status", "--json"])
+    if serve is None:
+        return "", status, {}, f"`tailscale serve status` failed: {err}"
+    dns_name = str((status.get("Self") or {}).get("DNSName") or "").rstrip(".")
+    return dns_name, status, serve, ""
+
+
+def _load_tailnet_policy(hermes_home: Path) -> tuple[dict[str, Any], str]:
+    """The reviewed exposure list, or ({}, reason) when the file is missing or unreadable."""
+    path = hermes_home / TAILNET_POLICY_RELATIVE_PATH
+    if not path.exists():
+        return {}, f"{path} not found"
+    policy = _parse_yaml(path)
+    if not policy:
+        return {}, f"{path} is empty or not valid YAML"
+    return policy, ""
+
+
+def _policy_serve(policy: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """policy["serve"] keyed by the port as a string."""
+    raw = policy.get("serve")
+    return {str(port): entry for port, entry in raw.items() if isinstance(entry, dict)} if isinstance(raw, dict) else {}
+
+
+def _serve_configs(serve: dict[str, Any]) -> list[dict[str, Any]]:
+    """The background serve config plus every foreground `tailscale serve` session."""
+    configs = [serve]
+    foreground = serve.get("Foreground")
+    if isinstance(foreground, dict):
+        configs.extend(c for c in foreground.values() if isinstance(c, dict))
+    return configs
+
+
+def _loopback_upstream(url: str) -> tuple[bool, int | None]:
+    parsed = urllib.parse.urlparse(url if "://" in url else "http://" + url)
+    host = (parsed.hostname or "").lower()
+    try:
+        port = parsed.port
+    except ValueError:
+        port = None
+    return host in LOOPBACK_HOSTS, port
+
+
+def check_tailnet_exposure(hermes_home: Path) -> AuditSection:
+    """What `tailscale serve` publishes, against the reviewed list in the Hermes home.
+
+    Fails on Funnel (public internet), Tailscale SSH, anything served that the list does
+    not name, a served upstream that is not a loopback proxy or differs from the list,
+    and an upstream port that also listens on a non-loopback address (reachable around
+    Tailscale). Warns on tailnet devices of other users and on listed ports not served.
+    """
+    title = "Tailnet exposure"
+    dns_name, status, serve, reason = _tailnet_state()
+    if reason:
+        return AuditSection("SEC-010", title, "info", reason)
+    policy, policy_error = _load_tailnet_policy(hermes_home)
+    allowed = _policy_serve(policy)
+    allowed_tcp = {str(k): str(v) for k, v in (policy.get("tcp_forward") or {}).items()} if isinstance(
+        policy.get("tcp_forward"), dict) else {}
+    problems: list[str] = []
+    warnings: list[str] = []
+    if policy_error:
+        problems.append(f"no reviewed exposure list ({policy_error}); every served port counts as unreviewed")
+
+    served: list[dict[str, Any]] = []
+    for cfg in _serve_configs(serve):
+        for host_port, on in (cfg.get("AllowFunnel") or {}).items():
+            if on:
+                problems.append(f"Funnel is on for {host_port}: it is reachable from the public internet")
+        for port, tcp in (cfg.get("TCP") or {}).items():
+            forward = tcp.get("TCPForward") if isinstance(tcp, dict) else None
+            if forward and allowed_tcp.get(str(port)) != forward:
+                problems.append(f"raw TCP forward on :{port} to {forward} is not in the reviewed list")
+        if cfg.get("Services"):
+            problems.append("Tailscale Services are configured (%s) and not reviewed" % ", ".join(sorted(cfg["Services"])))
+        for host_port, body in (cfg.get("Web") or {}).items():
+            port = host_port.rsplit(":", 1)[-1]
+            for path, handler in ((body or {}).get("Handlers") or {}).items():
+                handler = handler if isinstance(handler, dict) else {}
+                upstream = str(handler.get("Proxy") or "")
+                entry = {"port": port, "path": path, "upstream": upstream or None}
+                served.append(entry)
+                where = f":{port}{path}"
+                if not upstream:
+                    kind = "files from " + str(handler["Path"]) if handler.get("Path") else "static text"
+                    problems.append(f"{where} serves {kind}, not a loopback proxy")
+                    continue
+                loopback, upstream_port = _loopback_upstream(upstream)
+                entry["upstream_port"] = upstream_port
+                if not loopback:
+                    problems.append(f"{where} proxies to {upstream}, which is not loopback")
+                want = allowed.get(port)
+                want_path = str((want or {}).get("path") or "/")
+                if not want or want_path != path:
+                    problems.append(f"{where} ({upstream}) is not in the reviewed list")
+                elif str(want.get("upstream") or "").rstrip("/") != upstream.rstrip("/"):
+                    problems.append(f"{where} proxies to {upstream}; the reviewed list says {want.get('upstream')}")
+
+    served_ports = {e["port"] for e in served}
+    for port, want in sorted(allowed.items()):
+        if port not in served_ports:
+            warnings.append(f":{port} ({want.get('name') or want.get('upstream')}) is in the reviewed list but not served")
+
+    upstream_ports = sorted({e["upstream_port"] for e in served if e.get("upstream_port")})
+    listeners_result = _run(["lsof", "-nP", "-iTCP", "-sTCP:LISTEN"], timeout=30)
+    if listeners_result["stdout"].strip():
+        for listener in _parse_listeners(listeners_result["stdout"]):
+            if listener["port"] in upstream_ports and not listener["loopback"]:
+                problems.append(
+                    f"upstream port {listener['port']} also listens on {listener['endpoint']} ({listener['process']}), "
+                    "reachable without Tailscale")
+    elif upstream_ports:
+        warnings.append("could not list TCP listeners to confirm the upstreams bind loopback only")
+
+    prefs, prefs_error = _json_command([_tailscale_cli() or "tailscale", "debug", "prefs"])
+    tailscale_ssh = bool((prefs or {}).get("RunSSH"))
+    if prefs is None:
+        warnings.append(f"could not read Tailscale prefs: {prefs_error}")
+    elif tailscale_ssh and not policy.get("allow_tailscale_ssh"):
+        problems.append("Tailscale SSH is on: tailnet devices the ACL allows can open a shell on this machine")
+
+    self_node = status.get("Self") or {}
+    users = status.get("User") or {}
+    foreign = sorted(
+        str(peer.get("HostName") or peer.get("DNSName") or "?")
+        for peer in (status.get("Peer") or {}).values()
+        if isinstance(peer, dict) and (peer.get("ShareeNode") or peer.get("UserID") != self_node.get("UserID")))
+    if foreign:
+        warnings.append(f"{len(foreign)} tailnet device(s) not owned by {users.get(str(self_node.get('UserID')), {}).get('LoginName', 'this user')} "
+                        "can reach the served ports unless the tailnet ACL blocks them")
+    funnel_allowed = any("funnel" in str(cap) for cap in (self_node.get("CapMap") or {}))
+    if funnel_allowed:
+        warnings.append("the tailnet policy lets this machine turn Funnel on; remove the funnel node attribute to rule it out")
+
+    status_value = "fail" if problems else "warn" if warnings else "pass"
+    if problems:
+        summary = f"{len(problems)} exposure problem(s): " + "; ".join(problems[:3])
+    elif warnings:
+        summary = f"{len(served)} served handler(s), all reviewed and loopback-only; " + "; ".join(warnings[:2])
+    else:
+        summary = f"{len(served)} served handler(s), all reviewed and loopback-only; Funnel and Tailscale SSH off."
+    data = {
+        "dns_name": dns_name,
+        "served": served,
+        "problems": problems,
+        "warnings": warnings,
+        "foreign_peers": foreign,
+        "tailscale_ssh": tailscale_ssh,
+        "funnel_allowed_by_policy": funnel_allowed,
+        "policy": str(hermes_home / TAILNET_POLICY_RELATIVE_PATH),
+    }
+    return AuditSection("SEC-010", title, status_value, summary, data)
+
+
+def _http_probe(url: str, host_header: str | None = None, timeout: int = 10) -> tuple[int | None, str, str]:
+    """(status, absolute Location, error) for one GET without cookies; redirects are not followed."""
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme == "https":
+        conn: http.client.HTTPConnection = http.client.HTTPSConnection(
+            parsed.hostname or "", parsed.port or 443, timeout=timeout, context=ssl.create_default_context())
+    else:
+        conn = http.client.HTTPConnection(parsed.hostname or "", parsed.port or 80, timeout=timeout)
+    target = (parsed.path or "/") + (f"?{parsed.query}" if parsed.query else "")
+    try:
+        conn.request("GET", target, headers={"Host": host_header} if host_header else {})
+        resp = conn.getresponse()
+        resp.read(65536)
+        location = resp.getheader("Location") or ""
+        return resp.status, urllib.parse.urljoin(url, location) if location else "", ""
+    except (OSError, http.client.HTTPException) as exc:
+        return None, "", f"{type(exc).__name__}: {exc}"[:200]
+    finally:
+        conn.close()
+
+
+def check_tailnet_login_gates(hermes_home: Path) -> AuditSection:
+    """Unauthenticated requests through the tailnet URLs, from the reviewed list's `probes`.
+
+    Fails when a probe gets a 2xx it did not expect: that page or API answers without a
+    login. Warns on other unexpected answers (a service down, a redirect somewhere else)
+    and on served ports the list gives no probes for.
+    """
+    title = "Tailnet login gates"
+    dns_name, _status, serve, reason = _tailnet_state()
+    if reason:
+        return AuditSection("SEC-011", title, "info", reason)
+    policy, policy_error = _load_tailnet_policy(hermes_home)
+    if policy_error:
+        return AuditSection("SEC-011", title, "warn", f"No probes to run: {policy_error}.")
+    served_ports = {hp.rsplit(":", 1)[-1] for cfg in _serve_configs(serve) for hp in (cfg.get("Web") or {})}
+
+    jobs: list[tuple[str, str | None, dict[str, Any]]] = []
+    warnings: list[str] = []
+    for port, entry in sorted(_policy_serve(policy).items()):
+        if port not in served_ports:
+            continue
+        probes = [pr for pr in (entry.get("probes") or []) if isinstance(pr, dict) and pr.get("path")]
+        if not probes:
+            warnings.append(f":{port} is served but the reviewed list has no probes for it")
+        base = f"https://{dns_name}" + ("" if port == "443" else f":{port}")
+        jobs.extend((base + str(pr["path"]), None, pr) for pr in probes)
+    for pr in policy.get("refuse_tailnet_host") or []:
+        if isinstance(pr, dict) and pr.get("url"):
+            jobs.append((str(pr["url"]), str(pr.get("host") or "{host}").replace("{host}", dns_name), pr))
+
+    results: list[dict[str, Any]] = []
+    failures: list[str] = []
+    for url, host_header, probe in jobs:
+        expect = [int(code) for code in (probe.get("expect") or [])]
+        code, location, error = _http_probe(url, host_header)
+        label = url + (f" (Host {host_header})" if host_header else "")
+        want_location = str(probe.get("location") or "").replace("{host}", dns_name)
+        note = ""
+        if code is None:
+            note = f"no answer: {error}"
+        elif code not in expect:
+            note = f"answered {code}, expected {'/'.join(map(str, expect)) or 'a refusal'}"
+        elif want_location and not location.startswith(want_location):
+            note = f"redirects to {location or 'nowhere'}, expected {want_location}…"
+        if code is not None and 200 <= code < 300 and code not in expect:
+            failures.append(f"{label} answers {code} without a login")
+        elif note:
+            warnings.append(f"{label} {note}")
+        results.append({"url": url, "host": host_header, "status": code, "expected": expect, "ok": not note})
+
+    status_value = "fail" if failures else "warn" if warnings else "pass"
+    if failures:
+        summary = f"{len(failures)} request(s) got through without a login: " + "; ".join(failures[:3])
+    elif warnings:
+        summary = f"{len(results)} probe(s), none answered without a login; " + "; ".join(warnings[:2])
+    else:
+        summary = f"{len(results)} unauthenticated probe(s) all refused or redirected to a login."
+    return AuditSection("SEC-011", title, status_value, summary,
+                        {"dns_name": dns_name, "probes": results, "failures": failures, "warnings": warnings})
+
+
+def _section_checks(home: Path, include_optional: bool) -> list[tuple[str, Callable[[], AuditSection]]]:
+    """(section id, check) in report order. Names resolve at call time, so tests can patch them."""
+    checks: list[tuple[str, Callable[[], AuditSection]]] = [
+        ("SEC-001", check_os_updates),
+        ("SEC-002", check_brew_updates),
+        ("SEC-003", check_listening_services),
+        ("SEC-004", lambda: check_secret_scan(home)),
+        ("SEC-005", lambda: check_file_modes(home)),
+        ("SEC-006", lambda: check_gateway_status(home)),
+        ("SEC-007", lambda: check_terminal_containerization(home)),
     ]
     if include_optional:
-        sections.extend([check_firewall_sharing(), check_git_backup_exposure(home)])
+        checks += [("SEC-008", check_firewall_sharing), ("SEC-009", lambda: check_git_backup_exposure(home))]
+    checks += [("SEC-010", lambda: check_tailnet_exposure(home)), ("SEC-011", lambda: check_tailnet_login_gates(home))]
+    return checks
+
+
+def expand_sections(only: str | None) -> set[str] | None:
+    """`--only` value ("tailnet", "SEC-010,SEC-004", ...) as a set of section ids, or None."""
+    if not only:
+        return None
+    ids: set[str] = set()
+    for item in (part.strip() for part in only.split(",")):
+        if item:
+            ids.update(SECTION_GROUPS.get(item.lower(), (item.upper(),)))
+    return ids
+
+
+def run_local_audit(
+    hermes_home: Path | None = None, include_optional: bool = True, only: set[str] | None = None,
+) -> dict[str, Any]:
+    """Run every section, or only the ids in *only* (optional sections included when named)."""
+    home = hermes_home or Path(get_hermes_home())
+    checks = _section_checks(home, include_optional or bool(only))
+    sections = [check() for section_id, check in checks if only is None or section_id in only]
     overall = "pass"
     for section in sections:
         if STATUS_ORDER[section.status] > STATUS_ORDER[overall]:
@@ -540,6 +851,7 @@ def run_local_audit(hermes_home: Path | None = None, include_optional: bool = Tr
         "local_only": True,
         "hermes_home": str(home),
         "overall_status": overall,
+        **({"only": sorted(only)} if only else {}),
         "sections": [section.as_dict() for section in sections],
     }
 
@@ -561,13 +873,17 @@ def _render_human(report: dict[str, Any]) -> str:
         for key in ("count", "listener_count", "exposed_count", "scanned_files", "issue_count", "running", "backend", "changed_entries"):
             if key in data:
                 lines.append(f"  {key}: {data[key]}")
+        for key in ("problems", "failures", "warnings"):
+            for item in (data.get(key) or [])[:10]:
+                lines.append(f"  - {item}")
         lines.append("")
     return "\n".join(lines).rstrip()
 
 
 def cmd_local_security_audit(args: argparse.Namespace) -> int:
     home = Path(getattr(args, "hermes_home", None) or get_hermes_home()).expanduser()
-    report = run_local_audit(home, include_optional=not bool(getattr(args, "minimal", False)))
+    only = expand_sections(getattr(args, "only", None))
+    report = run_local_audit(home, include_optional=not bool(getattr(args, "minimal", False)), only=only)
     if bool(getattr(args, "json", False)):
         print(json.dumps(report, indent=2, sort_keys=True))
     else:
@@ -584,4 +900,7 @@ __all__ = [
     "check_secret_scan",
     "check_file_modes",
     "check_terminal_containerization",
+    "check_tailnet_exposure",
+    "check_tailnet_login_gates",
+    "expand_sections",
 ]
