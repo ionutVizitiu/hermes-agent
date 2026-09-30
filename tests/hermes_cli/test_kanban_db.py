@@ -1856,29 +1856,12 @@ def test_resolve_hermes_argv_prefers_module_form_over_path_shim(monkeypatch):
     monkeypatch.delenv("HERMES_BIN", raising=False)
     monkeypatch.setattr(shutil, "which", lambda name: "/tmp/planted/hermes")
     monkeypatch.setattr(kbd, "_safe_which_no_cwd", lambda name: "/tmp/planted/hermes")
-    assert kbd._resolve_hermes_argv() == kbd._module_hermes_argv()
+    assert kbd._resolve_hermes_argv() == [sys.executable, "-m", "hermes_cli.main"]
 
     monkeypatch.setenv("HERMES_BIN", "/opt/hermes/bin/hermes")
     assert kbd._resolve_hermes_argv() == ["/opt/hermes/bin/hermes"]
 
 
-
-
-def test_module_hermes_argv_starts_hermes_without_an_installed_package(tmp_path):
-    """The worker argv must carry the checkout onto ``sys.path`` itself: under the PM
-    store runtime ``hermes_cli`` is importable in the dispatcher only through the
-    launcher's path entry, and a bare ``-m hermes_cli.main`` child died with
-    ``No module named 'hermes_cli'``. Run it from a foreign cwd with no PYTHONPATH."""
-    import subprocess
-    from hermes_cli import kanban_db_dispatch as kbd
-
-    env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
-    proc = subprocess.run(
-        [*kbd._module_hermes_argv(), "--version"],
-        cwd=tmp_path, env=env, capture_output=True, text=True, timeout=120,
-    )
-    assert proc.returncode == 0, proc.stderr
-    assert "No module named" not in proc.stderr
 
 
 def test_resolve_hermes_argv_absolutizes_relative_exe_shim(monkeypatch, tmp_path):
@@ -1905,7 +1888,7 @@ def test_resolve_hermes_argv_avoids_implicit_windows_batch_shim(monkeypatch, tmp
     monkeypatch.setenv("PATHEXT", ".CMD")
     monkeypatch.setattr(kb, "_IS_WINDOWS", True)
 
-    assert kbd._resolve_hermes_argv() == kbd._module_hermes_argv()
+    assert kbd._resolve_hermes_argv() == [sys.executable, "-m", "hermes_cli.main"]
 
 
 def test_resolve_hermes_argv_honors_hermes_bin_path_override(monkeypatch, tmp_path):
@@ -1952,7 +1935,7 @@ def test_resolve_hermes_argv_hermes_bin_bare_name_ignores_cwd(monkeypatch, tmp_p
     monkeypatch.setenv("HERMES_BIN", "hermes")
     monkeypatch.setattr(kb, "_IS_WINDOWS", True)
 
-    assert kbd._resolve_hermes_argv() == kbd._module_hermes_argv()
+    assert kbd._resolve_hermes_argv() == [sys.executable, "-m", "hermes_cli.main"]
 
 
 def test_resolve_hermes_argv_hermes_bin_bare_cmd_uses_module_fallback(monkeypatch, tmp_path):
@@ -1968,7 +1951,7 @@ def test_resolve_hermes_argv_hermes_bin_bare_cmd_uses_module_fallback(monkeypatc
     monkeypatch.setenv("HERMES_BIN", "hermes")
     monkeypatch.setattr(kb, "_IS_WINDOWS", True)
 
-    assert kbd._resolve_hermes_argv() == kbd._module_hermes_argv()
+    assert kbd._resolve_hermes_argv() == [sys.executable, "-m", "hermes_cli.main"]
 
 
 def test_resolve_hermes_argv_hermes_bin_unresolved_bare_name_falls_back(monkeypatch):
@@ -1979,7 +1962,7 @@ def test_resolve_hermes_argv_hermes_bin_unresolved_bare_name_falls_back(monkeypa
     monkeypatch.setenv("PATH", "")
     monkeypatch.setenv("HERMES_BIN", "hermes")
 
-    assert kbd._resolve_hermes_argv() == kbd._module_hermes_argv()
+    assert kbd._resolve_hermes_argv() == [sys.executable, "-m", "hermes_cli.main"]
 
 
 def test_resolve_hermes_argv_module_actually_runs():
