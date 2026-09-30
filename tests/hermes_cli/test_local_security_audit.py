@@ -138,7 +138,7 @@ serve:
     upstream: http://127.0.0.1:9119
     probes:
       - {path: /kanban, expect: [302], location: "https://{host}:8444/login?"}
-refuse_tailnet_host:
+loopback_probes:
   - {url: "http://127.0.0.1:8770/", host: "{host}:8443", expect: [421]}
 """
 

@@ -773,7 +773,7 @@ def check_tailnet_login_gates(hermes_home: Path) -> AuditSection:
             warnings.append(f":{port} is served but the reviewed list has no probes for it")
         base = f"https://{dns_name}" + ("" if port == "443" else f":{port}")
         jobs.extend((base + str(pr["path"]), None, pr) for pr in probes)
-    for pr in policy.get("refuse_tailnet_host") or []:
+    for pr in policy.get("loopback_probes") or []:
         if isinstance(pr, dict) and pr.get("url"):
             jobs.append((str(pr["url"]), str(pr.get("host") or "{host}").replace("{host}", dns_name), pr))
 
