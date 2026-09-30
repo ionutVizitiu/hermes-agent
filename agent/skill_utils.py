@@ -387,10 +387,6 @@ def get_skill_create_dir() -> Optional[Path]:
     """Configured ``skills.create_dir`` (need not exist yet), or None when unset;
     relative to HERMES_HOME; a value equal to the local skills dir counts as unset."""
     raw = _skills_cfg_get("create_dir")
-    if raw is None:
-        # Backward compatibility for local installations that adopted the
-        # original custom-branch spelling before ``create_dir`` was upstreamed.
-        raw = _skills_cfg_get("creation_dir")
     entry = str(raw).strip() if raw and isinstance(raw, (str, os.PathLike)) else ""
     if not entry:
         return None
