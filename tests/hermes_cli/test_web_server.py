@@ -5230,6 +5230,23 @@ class TestServeIndexMissingIndex:
         assert resp.status_code == 200
         assert "SPA-rebuilt" in resp.text
 
+    def test_index_withholds_token_from_container_proxied_requests(
+        self, tmp_path, monkeypatch
+    ):
+        import hermes_cli.dashboard_auth.peer_origin as po
+        import hermes_cli.web_server as ws
+
+        monkeypatch.setattr(po, "request_is_container_proxied", lambda request: True)
+        monkeypatch.setattr(ws, "_SESSION_TOKEN", "must-not-leak")
+        client, _dist = self._client_with_dist(
+            tmp_path, monkeypatch, write_index=True
+        )
+        resp = client.get("/chat")
+
+        assert resp.status_code == 200
+        assert "must-not-leak" not in resp.text
+        assert "__HERMES_SESSION_TOKEN__" not in resp.text
+
     def test_index_uses_ssh_token_applied_after_spa_mount(
         self, tmp_path, monkeypatch
     ):
@@ -5309,6 +5326,16 @@ class TestHeadlessServeTokenPage:
 
         assert match, resp.text
         assert json.loads(match.group(1)) == "after-mount"
+
+    def test_root_withholds_token_from_container_proxied_requests(self, monkeypatch):
+        import hermes_cli.dashboard_auth.peer_origin as po
+
+        monkeypatch.setattr(po, "request_is_container_proxied", lambda request: True)
+        client, ws = self._headless_client(monkeypatch, gated=False)
+        resp = client.get("/")
+        assert resp.status_code == 404
+        assert ws._SESSION_TOKEN not in resp.text
+        assert "__HERMES_SESSION_TOKEN__" not in resp.text
 
     def test_root_stays_404_json_when_auth_gated(self, monkeypatch):
         client, ws = self._headless_client(monkeypatch, gated=True)
