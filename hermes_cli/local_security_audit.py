@@ -706,10 +706,11 @@ def check_tailnet_exposure(hermes_home: Path) -> AuditSection:
         warnings.append("the tailnet policy lets this machine turn Funnel on; remove the funnel node attribute to rule it out")
 
     status_value = "fail" if problems else "warn" if warnings else "pass"
+    # Counts only: summaries land in the scheduled .txt reports, which are kept in git.
     if problems:
-        summary = f"{len(problems)} exposure problem(s): " + "; ".join(problems[:3])
+        summary = f"{len(problems)} exposure problem(s), {len(warnings)} warning(s) across {len(served)} served handler(s)."
     elif warnings:
-        summary = f"{len(served)} served handler(s), all reviewed and loopback-only; " + "; ".join(warnings[:2])
+        summary = f"{len(served)} served handler(s), all reviewed and loopback-only; {len(warnings)} warning(s)."
     else:
         summary = f"{len(served)} served handler(s), all reviewed and loopback-only; Funnel and Tailscale SSH off."
     data = {
@@ -798,9 +799,9 @@ def check_tailnet_login_gates(hermes_home: Path) -> AuditSection:
 
     status_value = "fail" if failures else "warn" if warnings else "pass"
     if failures:
-        summary = f"{len(failures)} request(s) got through without a login: " + "; ".join(failures[:3])
+        summary = f"{len(failures)} of {len(results)} unauthenticated probe(s) got through without a login."
     elif warnings:
-        summary = f"{len(results)} probe(s), none answered without a login; " + "; ".join(warnings[:2])
+        summary = f"{len(results)} probe(s), none answered without a login; {len(warnings)} unexpected answer(s)."
     else:
         summary = f"{len(results)} unauthenticated probe(s) all refused or redirected to a login."
     return AuditSection("SEC-011", title, status_value, summary,
@@ -856,7 +857,9 @@ def run_local_audit(
     }
 
 
-def _render_human(report: dict[str, Any]) -> str:
+def _render_human(report: dict[str, Any], details: bool = False) -> str:
+    """Text report. *details* adds each section's problem lines (tailnet names, ports); the
+    scheduled .txt reports stay at counts and statuses because they are kept in git."""
     lines = [
         "Hermes local security audit",
         f"Overall: {report['overall_status'].upper()}",
@@ -873,7 +876,7 @@ def _render_human(report: dict[str, Any]) -> str:
         for key in ("count", "listener_count", "exposed_count", "scanned_files", "issue_count", "running", "backend", "changed_entries"):
             if key in data:
                 lines.append(f"  {key}: {data[key]}")
-        for key in ("problems", "failures", "warnings"):
+        for key in ("problems", "failures", "warnings") if details else ():
             for item in (data.get(key) or [])[:10]:
                 lines.append(f"  - {item}")
         lines.append("")
@@ -887,7 +890,7 @@ def cmd_local_security_audit(args: argparse.Namespace) -> int:
     if bool(getattr(args, "json", False)):
         print(json.dumps(report, indent=2, sort_keys=True))
     else:
-        print(_render_human(report))
+        print(_render_human(report, details=True))
     if bool(getattr(args, "fail_on_fail", False)) and report["overall_status"] == "fail":
         return 1
     return 0

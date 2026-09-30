@@ -307,3 +307,11 @@ def test_http_probe_resolves_relative_location(monkeypatch):
 
     monkeypatch.setattr(lsa.http.client, "HTTPSConnection", Conn)
     assert lsa._http_probe(f"https://{HOST}:8444/kanban") == (302, f"https://{HOST}:8444/login?next=%2Fkanban", "")
+
+
+def test_text_report_keeps_problem_lines_out_unless_asked():
+    report = {"overall_status": "fail", "hermes_home": "/h", "sections": [{
+        "id": "SEC-010", "title": "Tailnet exposure", "status": "fail", "summary": "1 problem",
+        "data": {"problems": [f"Funnel is on for {HOST}:443"]}, "errors": []}]}
+    assert HOST not in lsa._render_human(report)
+    assert f"- Funnel is on for {HOST}:443" in lsa._render_human(report, details=True)
