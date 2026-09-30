@@ -202,8 +202,8 @@ def install_launchd_schedule(args: argparse.Namespace) -> dict[str, Any]:
     message = "plist written"
     if not bool(getattr(args, "no_load", False)):
         uid = os.getuid()
-        subprocess.run(["launchctl", "bootout", f"gui/{uid}", str(plist_path)], check=False, capture_output=True, text=True)
-        proc = subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", str(plist_path)], check=False, capture_output=True, text=True)
+        subprocess.run(["launchctl", "bootout", f"gui/{uid}", str(plist_path)], check=False, capture_output=True, text=True, encoding="utf-8", errors="replace")
+        proc = subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", str(plist_path)], check=False, capture_output=True, text=True, encoding="utf-8", errors="replace")
         loaded = proc.returncode == 0
         message = "plist written and loaded" if loaded else f"plist written; launchctl bootstrap failed: {proc.stderr.strip() or proc.stdout.strip()}"
 
@@ -223,7 +223,7 @@ def uninstall_launchd_schedule(args: argparse.Namespace) -> dict[str, Any]:
     bootout_returncode = None
     if shutil.which("launchctl"):
         uid = os.getuid()
-        bootout = subprocess.run(["launchctl", "bootout", f"gui/{uid}", str(plist_path)], check=False, capture_output=True, text=True)
+        bootout = subprocess.run(["launchctl", "bootout", f"gui/{uid}", str(plist_path)], check=False, capture_output=True, text=True, encoding="utf-8", errors="replace")
         bootout_returncode = bootout.returncode
     existed = plist_path.exists()
     if existed:
@@ -243,7 +243,7 @@ def schedule_status(args: argparse.Namespace) -> dict[str, Any]:
     loaded = False
     if shutil.which("launchctl"):
         uid = os.getuid()
-        proc = subprocess.run(["launchctl", "print", f"gui/{uid}/{LABEL}"], check=False, capture_output=True, text=True)
+        proc = subprocess.run(["launchctl", "print", f"gui/{uid}/{LABEL}"], check=False, capture_output=True, text=True, encoding="utf-8", errors="replace")
         loaded = proc.returncode == 0
     return {
         "label": LABEL,
