@@ -104,21 +104,24 @@ def mount_spa(application: FastAPI):
     """
     from hermes_cli.web_server import WEB_DIST, _DASHBOARD_EMBEDDED_CHAT_ENABLED, app
     from hermes_cli.web_deps import _server
+    from hermes_cli.dashboard_auth.peer_origin import request_is_container_proxied
 
     # `hermes serve` is the headless backend: it must NEVER serve the browser SPA, even if a
     # dist is lying around, so only the JSON-RPC/WS/API surface is reachable.
     if os.environ.get("HERMES_SERVE_HEADLESS") == "1":
 
         @application.get("/{full_path:path}")
-        async def no_frontend(full_path: str):
+        async def no_frontend(full_path: str, request: Request):
             # Desktop token handshake: the Electron shell boots by fetching `/` and reading
             # ``window.__HERMES_SESSION_TOKEN__`` for /api/ws auth. When headless 404'd every
             # path, a renderer whose spawn token no longer matched (e.g. after `hermes update`)
             # white-screened. Serve a token-only page at the exact root, but ONLY when the auth
             # gate is off: on a gated serve the token must never be readable without auth.
-            # See #94227, #95575.
+            # See #94227, #95575. Nor to a container: Docker Desktop relays a container's
+            # host.docker.internal connection onto loopback, so a loopback peer is not proof
+            # that the caller runs on this machine (dashboard_auth/peer_origin.py).
             gated = bool(getattr(application.state, "auth_required", False))
-            if full_path == "" and not gated:
+            if full_path == "" and not gated and not request_is_container_proxied(request):
                 return HTMLResponse(
                     "<!doctype html><html><head><script>"
                     f"window.__HERMES_SESSION_TOKEN__={json.dumps(_server()._SESSION_TOKEN)};"
@@ -137,7 +140,7 @@ def mount_spa(application: FastAPI):
     # index.html is unreadable; the asset mounts use check_dir=False and 404 on missing files), so mounting
     # them unconditionally makes the dashboard recover the moment a build appears on disk — no restart
     # needed.
-    def _serve_index(prefix: str = ""):
+    def _serve_index(prefix: str = "", request: Request | None = None):
         """index.html with the session token + base-path injected.
 
         When the OAuth auth gate is active (``app.state.auth_required``), the legacy
@@ -152,7 +155,9 @@ def mount_spa(application: FastAPI):
             return JSONResponse({"error": "Frontend not built. Run: cd web && npm run build"}, status_code=404)
         chat_js = "true" if _DASHBOARD_EMBEDDED_CHAT_ENABLED else "false"
         gated = bool(getattr(app.state, "auth_required", False))
-        token_js = "" if gated else f'window.__HERMES_SESSION_TOKEN__="{_server()._SESSION_TOKEN}";'
+        # Withheld from container-proxied requests too (see the headless handshake above).
+        withhold = gated or (request is not None and request_is_container_proxied(request))
+        token_js = "" if withhold else f'window.__HERMES_SESSION_TOKEN__="{_server()._SESSION_TOKEN}";'
         # Launcher-preselected profile (``--open-profile``): the SPA's fallback scope when the URL
         # omits ``?profile=`` (#73085). ``</`` escaped so a hostile name cannot close the script tag.
         initial_profile_js = json.dumps(str(getattr(application.state, "initial_profile", "") or "")).replace("</", "<\\/")
@@ -230,7 +235,7 @@ def mount_spa(application: FastAPI):
             and file_path.is_file()
         ):
             return FileResponse(file_path)
-        return _serve_index(prefix)
+        return _serve_index(prefix, request)
 
 
 # ---------------------------------------------------------------------------
