@@ -29,8 +29,6 @@ PROXY_COMMAND_PREFIXES = (
     "limactl",  # Lima, Colima, Rancher Desktop
     "gvproxy",  # Podman machine
     "qemu-system",
-    "vmnet-natd",  # VMware Fusion NAT
-    "prl_naptd",  # Parallels NAT
     "com.apple.Virtualization",
 )
 _LSOF_TIMEOUT_SECONDS = 2.0
