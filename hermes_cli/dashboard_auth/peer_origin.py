@@ -25,10 +25,6 @@ PROXY_COMMAND_PREFIXES = (
     "com.docker.",  # Docker Desktop: com.docker.backend, com.docker.vpnkit
     "vpnkit",
     "docker-proxy",
-    "OrbStack",
-    "limactl",  # Lima, Colima, Rancher Desktop
-    "gvproxy",  # Podman machine
-    "qemu-system",
     "com.apple.Virtualization",
 )
 _LSOF_TIMEOUT_SECONDS = 2.0
