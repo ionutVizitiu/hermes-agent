@@ -150,6 +150,37 @@ def _session_expired_response(request: Request) -> Response:
     return response
 
 
+_UNSAFE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+
+
+def _cross_site_write_reason(request: Request) -> str:
+    """Why a cookie-authenticated write must be refused as cross-site, or "".
+
+    Session cookies are host-only, and browsers send them to every port on the host: a page
+    served by another service on the same tailnet name (e.g. :443 next to the dashboard on
+    :8444) is same-site, so SameSite=Lax does not stop its POSTs. A write is accepted only from
+    the dashboard's own origin (or dashboard.public_url's); a browser says where a request
+    comes from with Origin and Sec-Fetch-Site. Clients that send neither (curl, the native
+    bearer path) carry no ambient-cookie risk and pass.
+    """
+    if request.method not in _UNSAFE_METHODS:
+        return ""
+    site = request.headers.get("sec-fetch-site")
+    if site and site not in ("same-origin", "none"):
+        return f"sec-fetch-site {site}"
+    origin = request.headers.get("origin")
+    if origin is None:
+        return ""
+    host = request.headers.get("host", "")
+    allowed = {f"{'https' if detect_https(request) else 'http'}://{host}".lower()}
+    from hermes_cli.dashboard_auth.prefix import resolve_public_url
+    public = resolve_public_url()
+    if public:
+        parts = public.split("/", 3)
+        allowed.add("/".join(parts[:3]).lower())
+    return "" if origin.lower() in allowed else f"origin {origin[:80]} is not the dashboard's"
+
+
 async def gated_auth_middleware(
     request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
     """Engaged only when ``app.state.auth_required is True``."""
@@ -175,6 +206,11 @@ async def gated_auth_middleware(
         return _unauth_response(request, reason="invalid_or_expired_session")
 
     at, _rt = read_session_cookies(request)
+    if at or _rt:
+        reason = _cross_site_write_reason(request)
+        if reason:
+            _log.warning("refused a cross-site %s %s: %s", request.method, request.url.path, reason)
+            return JSONResponse({"detail": "Cross-site request refused"}, status_code=403)
     provider_hint = read_session_provider(request)
     if not at and not _rt:
         # No session at all: try the silent portal bounce before /login.

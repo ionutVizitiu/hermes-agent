@@ -29,6 +29,9 @@ PROXY_COMMAND_PREFIXES = (
     "limactl",  # Lima, Colima, Rancher Desktop
     "gvproxy",  # Podman machine
     "qemu-system",
+    "vmnet-natd",  # VMware Fusion NAT
+    "prl_naptd",  # Parallels NAT
+    "com.apple.Virtualization",
 )
 _LSOF_TIMEOUT_SECONDS = 2.0
 _warned_no_lsof = False
@@ -36,9 +39,11 @@ _warned_no_lsof = False
 
 def _is_loopback(host: str) -> bool:
     try:
-        return ipaddress.ip_address(host.split("%", 1)[0]).is_loopback
+        ip = ipaddress.ip_address(host.split("%", 1)[0])
     except ValueError:
         return False
+    mapped = getattr(ip, "ipv4_mapped", None)  # ::ffff:127.0.0.1 on a dual-stack bind
+    return (mapped or ip).is_loopback
 
 
 def _lsof_endpoint(host: str, port: int) -> str:
@@ -96,3 +101,28 @@ def is_container_proxy(client_host: Optional[str], client_port: Optional[int]) -
 def request_is_container_proxied(request) -> bool:
     client = getattr(request, "client", None)
     return is_container_proxy(getattr(client, "host", None), getattr(client, "port", None))
+
+
+# Node's fetch (the Electron main process, `hermes` tooling) sends `sec-fetch-mode: cors` but
+# never Origin, Sec-Fetch-Site or Sec-Fetch-Dest; browsers send Sec-Fetch-Site and
+# Sec-Fetch-Dest to localhost, and Origin on every cross-origin fetch. So those three mark a
+# browser, and Sec-Fetch-Mode alone does not.
+
+
+def request_is_cross_origin_read(request) -> bool:
+    """True for a browser fetch/XHR from another origin, which that page could read: not a
+    navigation, and an Origin header or a same-site/cross-site Sec-Fetch-Site. The CORS
+    policy lets any localhost origin read responses, so a page on another loopback port must
+    not get the token that way. Navigations (the dashboard opened in a browser), same-origin
+    fetches and non-browser clients pass."""
+    headers = getattr(request, "headers", {}) or {}
+    if headers.get("sec-fetch-mode") == "navigate":
+        return False
+    return bool(headers.get("origin")) or headers.get("sec-fetch-site") in ("same-site", "cross-site")
+
+
+def request_is_from_a_browser(request) -> bool:
+    """True when a browser-only marker is present. The headless token page serves only the
+    Electron main process, whose Node fetch sends none of them."""
+    headers = getattr(request, "headers", {}) or {}
+    return any(headers.get(h) for h in ("origin", "sec-fetch-site", "sec-fetch-dest"))
